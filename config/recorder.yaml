@@ -1,0 +1,19 @@
+control_bind_addr: "tcp://0.0.0.0:5560"
+advertise_host: "192.168.41.2"
+state_port_min: 5600
+state_port_max: 5699
+output_dir: "/home/nvidia/teleop_logs"
+
+camera_topics:
+  head: "/camera/color/image_raw"
+  left_wrist: "/camera/left/image_rgb"
+  right_wrist: "/camera/right/image_rgb"
+
+image_width: 640
+image_height: 480
+startup_timeout_s: 10.0
+camera_stale_timeout_s: 1.0
+state_drain_timeout_s: 5.0
+tail_wait_timeout_s: 1.0
+state_receive_hwm: 10000
+

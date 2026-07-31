@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiangong-distributed-recorder"
+version = "0.1.0"
+description = "Distributed image/state recorder for Tiangong teleoperation"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "pyzmq",
+]
+
+[tool.setuptools.packages.find]
+include = ["tiangong_recorder*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
