@@ -1,0 +1,22 @@
+input_dir: "/home/nvidia/teleop_logs"
+dataset_root: "/home/nvidia/lerobot_datasets/tiangong_teleop"
+state_db: "/home/nvidia/lerobot_datasets/.tiangong_converter.sqlite3"
+lock_file: "/home/nvidia/lerobot_datasets/.tiangong_converter.lock"
+repo_id: "local/tiangong_teleop"
+fps: 50
+task: "Teleoperate the Tiangong robot"
+use_videos: true
+delete_source_pkl: true
+poll_interval_s: 2.0
+retry_errors: false
+image_width: 640
+image_height: 480
+image_writer_threads: 2
+direct_video_bitrate: 8000000
+state_key: "observation.state"
+action_key: "action"
+image_prefix: "observation.images"
+camera_color_order:
+  head: "rgb"
+  left_wrist: "bgr"
+  right_wrist: "bgr"

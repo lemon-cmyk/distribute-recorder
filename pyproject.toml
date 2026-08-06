@@ -13,9 +13,13 @@ dependencies = [
     "pyzmq",
 ]
 
+[project.optional-dependencies]
+lerobot-v21 = [
+    "lerobot==0.3.3",
+]
+
 [tool.setuptools.packages.find]
 include = ["tiangong_recorder*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

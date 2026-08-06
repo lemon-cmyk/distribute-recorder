@@ -28,3 +28,50 @@ both boards in the same wall-clock domain.
 python3 -m pytest -q
 python3 -m compileall tiangong_recorder
 ```
+
+## Convert PKL recordings to LeRobot v2.1
+
+Create the isolated converter environment once, then start the independent
+scanner. The recorder can continue saving PKLs while this process converts
+completed episodes serially.
+
+```bash
+./scripts/setup_converter_env.sh
+./scripts/start_converter.sh \
+  --dataset-name tiangong_pick_cube \
+  --task "Pick up the cube and place it in the tray"
+```
+
+The converter reads final `/home/nvidia/teleop_logs/*.pkl` files and ignores
+`.pkl.tmp` files. It writes an MP4-backed LeRobot v2.1 dataset to
+`/home/nvidia/lerobot_datasets/<dataset-name>`. Images stay as NumPy arrays in
+memory and are streamed directly to Jetson's H.264 hardware encoder; no
+temporary PNG files are created. A source PKL is deleted only after
+`save_episode()` succeeds, the saved episode/frame count is verified, and
+durable conversion state is committed. Failed PKLs remain in place and their
+errors are recorded in the SQLite state database.
+
+`--dataset-name` derives all dataset-specific paths together. For the example
+above, the output is `tiangong_pick_cube/`, the state database is
+`.tiangong_pick_cube_converter.sqlite3`, the process lock is
+`.tiangong_pick_cube_converter.lock`, and the repository ID is
+`local/tiangong_pick_cube`, all under `/home/nvidia/lerobot_datasets` where
+applicable. `--task` is written into `meta/tasks.jsonl`. Both options are
+optional; omitting them uses `config/converter.yaml`. The dataset name must be
+new: if its output directory already exists, startup fails without changing or
+deleting it. A new dataset/state pair treats every PKL currently in the input
+directory as unconverted.
+
+Pressing `Ctrl+C` immediately interrupts the current file and exits with code
+130; it does not wait for the rest of the current directory scan or video
+encoding. The source PKL is retained. An interrupted run may leave its dataset
+directory behind, so that dataset name is intentionally rejected on the next
+launch; use a new name or remove the incomplete directory manually. During
+stage 7, each camera's MP4 encoder displays an in-place frame progress bar in
+an interactive terminal; redirected logs receive one line per 10%.
+
+Use `./scripts/start_converter.sh --retry-errors --once` after fixing a failed
+file, or add `--keep-source --once` for a non-deleting validation run. Head
+images are treated as RGB; wrist images are converted from BGR to RGB without
+resizing. MP4 encoding is lossy, so the deleted PKL cannot serve as a lossless
+image backup after a successful conversion.
