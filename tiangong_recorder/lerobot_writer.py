@@ -12,7 +12,24 @@ from .direct_lerobot_dataset import get_direct_lerobot_dataset_class
 
 
 CAMERA_NAMES = ("head", "left_wrist", "right_wrist")
+CAMERA_OUTPUT_NAMES = {
+    "head": "front",
+    "left_wrist": "left_wrist",
+    "right_wrist": "right_wrist",
+}
+OUTPUT_CAMERA_NAMES = tuple(CAMERA_OUTPUT_NAMES[name] for name in CAMERA_NAMES)
 ARM_NAMES = ("left_arm", "right_arm")
+TARGET_VECTOR_NAMES = (
+    *(f"left_arm_{index}.pos" for index in range(1, 8)),
+    "left_gripper.pos",
+    *(f"right_arm_{index}.pos" for index in range(1, 8)),
+    "right_gripper.pos",
+)
+DEFAULT_VIDEO_BITRATES = {
+    "front": 5_000_000,
+    "left_wrist": 2_000_000,
+    "right_wrist": 3_000_000,
+}
 
 
 def _debug(stage: str, message: str) -> None:
@@ -45,7 +62,7 @@ class LeRobotV21Writer:
         image_prefix: str = "observation.images",
         camera_color_order: Mapping[str, str] | None = None,
         image_writer_threads: int = 2,
-        direct_video_bitrate: int = 8_000_000,
+        direct_video_bitrates: Mapping[str, int] | None = None,
         _dataset_cls=None,
     ) -> None:
         if not task.strip():
@@ -80,9 +97,20 @@ class LeRobotV21Writer:
         self.image_prefix = self._feature_key(image_prefix.rstrip("."), "image_prefix")
         self.camera_color_order = orders
         self.image_writer_threads = int(image_writer_threads)
-        self.direct_video_bitrate = int(direct_video_bitrate)
-        if self.direct_video_bitrate <= 0:
-            raise ValueError("direct_video_bitrate must be positive")
+        self.direct_video_bitrates = dict(
+            DEFAULT_VIDEO_BITRATES
+            if direct_video_bitrates is None
+            else direct_video_bitrates
+        )
+        if set(self.direct_video_bitrates) != set(OUTPUT_CAMERA_NAMES):
+            raise ValueError(
+                f"direct_video_bitrates must contain exactly {OUTPUT_CAMERA_NAMES}"
+            )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in self.direct_video_bitrates.values()
+        ):
+            raise ValueError("direct_video_bitrates values must be positive integers")
         self._dataset_cls = _dataset_cls or self._import_lerobot_dataset()
         self.dataset = None
 
@@ -116,7 +144,7 @@ class LeRobotV21Writer:
         return get_direct_lerobot_dataset_class()
 
     def _image_key(self, camera_name: str) -> str:
-        return f"{self.image_prefix}.{camera_name}"
+        return f"{self.image_prefix}.{CAMERA_OUTPUT_NAMES[camera_name]}"
 
     @staticmethod
     def _float_vector(value: Any, name: str) -> np.ndarray:
@@ -127,39 +155,41 @@ class LeRobotV21Writer:
             raise ValueError(f"{name} contains NaN or infinity")
         return result
 
-    def _arm_vector(self, entry: dict, key: str) -> np.ndarray:
+    def _arm_vector(self, entry: dict, key: str, arm: str) -> np.ndarray:
         values = entry.get(key)
         if not isinstance(values, dict):
             raise ValueError(f"missing Tiangong field: {key}")
-        return np.concatenate(
-            [self._float_vector(values[arm], f"{key}.{arm}") for arm in ARM_NAMES]
-        )
+        if arm not in values:
+            raise ValueError(f"missing Tiangong field: {key}.{arm}")
+        result = self._float_vector(values[arm], f"{key}.{arm}")
+        if result.size != 7:
+            raise ValueError(f"{key}.{arm} must contain exactly 7 values")
+        return result
 
-    def _hand_vector(self, entry: dict, key: str) -> np.ndarray:
+    def _hand_vector(self, entry: dict, key: str, arm: str) -> np.ndarray:
         values = entry.get(key)
-        if values is None:
-            return np.empty((0,), dtype=np.float32)
         if not isinstance(values, dict):
-            raise ValueError(f"{key} must be a dictionary")
-        present = [values.get(arm) is not None for arm in ARM_NAMES]
-        if any(present) and not all(present):
-            raise ValueError(f"{key} must contain both hands or neither hand")
-        if not any(present):
-            return np.empty((0,), dtype=np.float32)
-        return np.concatenate(
-            [self._float_vector(values[arm], f"{key}.{arm}") for arm in ARM_NAMES]
-        )
+            raise ValueError(f"missing Tiangong field: {key}")
+        if arm not in values:
+            raise ValueError(f"missing Tiangong field: {key}.{arm}")
+        result = self._float_vector(values[arm], f"{key}.{arm}")
+        if result.size != 1:
+            raise ValueError(f"{key}.{arm} must contain exactly 1 value")
+        return result
 
-    def _state_action(self, entry: dict) -> tuple[np.ndarray, np.ndarray]:
-        state = np.concatenate(
-            [self._arm_vector(entry, "qpos"), self._hand_vector(entry, "gripper_qpos")]
-        ).astype(np.float32, copy=False)
-        action = np.concatenate(
+    def _ordered_vector(self, entry: dict, arm_key: str, hand_key: str) -> np.ndarray:
+        return np.concatenate(
             [
-                self._arm_vector(entry, "qpos_des"),
-                self._hand_vector(entry, "gripper_qpos_des"),
+                self._arm_vector(entry, arm_key, "left_arm"),
+                self._hand_vector(entry, hand_key, "left_arm"),
+                self._arm_vector(entry, arm_key, "right_arm"),
+                self._hand_vector(entry, hand_key, "right_arm"),
             ]
         ).astype(np.float32, copy=False)
+
+    def _state_action(self, entry: dict) -> tuple[np.ndarray, np.ndarray]:
+        state = self._ordered_vector(entry, "qpos", "gripper_qpos")
+        action = self._ordered_vector(entry, "qpos_des", "gripper_qpos_des")
         if state.shape != action.shape:
             raise ValueError(
                 f"state shape {state.shape} does not match action shape {action.shape}"
@@ -205,28 +235,20 @@ class LeRobotV21Writer:
                 self._source_image(entry, camera_name)
         return episode_data
 
-    @staticmethod
-    def _vector_names(size: int) -> list[str]:
-        arm_size = min(7, size // 2)
-        names = [
-            f"{arm}_arm_joint_{joint}"
-            for arm in ("left", "right")
-            for joint in range(arm_size)
-        ]
-        names.extend(("left_hand", "right_hand")[: max(0, size - len(names))])
-        names.extend(f"joint_{index}" for index in range(len(names), size))
-        return names[:size]
-
     def _features(self, first_frame: dict) -> dict:
         state_size = int(first_frame[self.state_key].shape[0])
-        names = self._vector_names(state_size)
+        if state_size != len(TARGET_VECTOR_NAMES):
+            raise ValueError(
+                f"target Tiangong2 schema requires 16 state/action values; got {state_size}"
+            )
+        names = list(TARGET_VECTOR_NAMES)
         features = {
-            self.state_key: {
+            self.action_key: {
                 "dtype": "float32",
                 "shape": (state_size,),
                 "names": names,
             },
-            self.action_key: {
+            self.state_key: {
                 "dtype": "float32",
                 "shape": (state_size,),
                 "names": names,
@@ -254,7 +276,7 @@ class LeRobotV21Writer:
             repo_id=self.repo_id,
             root=self.root,
             fps=self.fps,
-            robot_type="tiangong",
+            robot_type="Tiangong2",
             features=self._features(first_frame),
             use_videos=self.use_videos,
             image_writer_threads=0,
@@ -262,7 +284,7 @@ class LeRobotV21Writer:
         configure_direct_video = getattr(self.dataset, "configure_direct_video", None)
         if callable(configure_direct_video):
             configure_direct_video(
-                bitrate=self.direct_video_bitrate,
+                bitrates=self.direct_video_bitrates,
             )
         _debug("阶段 5/8：准备数据集", "数据集创建完成，NumPy 直接视频编码已初始化")
 

@@ -12,7 +12,10 @@ retry_errors: false
 image_width: 640
 image_height: 480
 image_writer_threads: 2
-direct_video_bitrate: 8000000
+direct_video_bitrates:
+  front: 5000000
+  left_wrist: 2000000
+  right_wrist: 3000000
 state_key: "observation.state"
 action_key: "action"
 image_prefix: "observation.images"

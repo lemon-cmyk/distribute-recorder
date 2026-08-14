@@ -45,8 +45,13 @@ completed episodes serially.
 The converter reads final `/home/nvidia/teleop_logs/*.pkl` files and ignores
 `.pkl.tmp` files. It writes an MP4-backed LeRobot v2.1 dataset to
 `/home/nvidia/lerobot_datasets/<dataset-name>`. Images stay as NumPy arrays in
-memory and are streamed directly to Jetson's H.264 hardware encoder; no
-temporary PNG files are created. A source PKL is deleted only after
+memory and are streamed directly to Jetson AGX Orin's AV1 hardware encoder; no
+temporary PNG files are created. The encoder writes a short-lived IVF file with
+a two-frame GOP, then FFmpeg losslessly remuxes it into a PyAV-seekable MP4 and
+removes the IVF file. The output uses the target Tiangong2 layout:
+`front`, `left_wrist`, and `right_wrist` videos, interleaved arm/gripper
+16-dimensional vectors, `list<float>` Parquet columns, and global
+`norm_stats.json`. A source PKL is deleted only after
 `save_episode()` succeeds, the saved episode/frame count is verified, and
 durable conversion state is committed. Failed PKLs remain in place and their
 errors are recorded in the SQLite state database.

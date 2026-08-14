@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tiangong_recorder.lerobot_writer import LeRobotV21Writer
+from tiangong_recorder.lerobot_writer import TARGET_VECTOR_NAMES, LeRobotV21Writer
 
 
 class FakeLeRobotDataset:
@@ -112,11 +112,24 @@ def test_writer_maps_state_action_and_camera_color(tmp_path, capsys):
     frame = writer.dataset.frames[0]
     assert frame["observation.state"].shape == (16,)
     assert frame["observation.state"].dtype == np.float32
+    assert np.allclose(
+        frame["observation.state"],
+        [*range(7), 0.1, *range(7, 14), 0.2],
+    )
     assert frame["action"].shape == (16,)
-    assert frame["observation.images.head"][0, 0].tolist() == [1, 2, 3]
+    assert np.allclose(
+        frame["action"],
+        [*range(14, 21), 0.3, *range(21, 28), 0.4],
+    )
+    assert frame["observation.images.front"][0, 0].tolist() == [1, 2, 3]
     assert frame["observation.images.left_wrist"][0, 0].tolist() == [30, 20, 10]
     assert writer.dataset.tasks == ["pick object", "pick object"]
-    assert writer.dataset.features["observation.images.head"]["dtype"] == "video"
+    assert writer.dataset.features["observation.images.front"]["dtype"] == "video"
+    assert list(writer.dataset.features)[:2] == ["action", "observation.state"]
+    assert writer.dataset.features["action"]["names"] == list(TARGET_VECTOR_NAMES)
+    with (writer.root / "meta" / "info.json").open(encoding="utf-8") as stream:
+        info = json.load(stream)
+    assert info["robot_type"] == "Tiangong2"
     assert writer.verify_episode(0, 2)
     output = capsys.readouterr().out
     for stage in ("阶段 4/8", "阶段 5/8", "阶段 6/8", "阶段 7/8", "阶段 8/8"):
@@ -138,7 +151,7 @@ def test_writer_rejects_state_action_size_mismatch(tmp_path):
     entry = make_entry()
     entry["gripper_qpos_des"] = None
 
-    with pytest.raises(ValueError, match="state shape"):
+    with pytest.raises(ValueError, match="missing Tiangong field"):
         writer.write_episode([entry])
 
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
+import os
 import time
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
-from .video_progress import encode_rgb_frames_with_jetson_h264
+from .video_progress import encode_rgb_frames_with_jetson_av1
 
 
 def _debug(stage: str, message: str) -> None:
@@ -76,6 +78,28 @@ def compute_numpy_episode_stats(
     return stats
 
 
+def compute_target_norm_stats(
+    states: np.ndarray,
+    actions: np.ndarray,
+) -> dict[str, dict[str, list[float]]]:
+    """Compute the global normalization file used by the target Tiangong dataset."""
+
+    result = {}
+    for output_key, values in (("state", states), ("actions", actions)):
+        array = np.asarray(values, dtype=np.float32)
+        if array.ndim != 2 or array.shape[1] != 16:
+            raise ValueError(
+                f"norm_stats {output_key} must have shape (frames, 16); got {array.shape}"
+            )
+        result[output_key] = {
+            "mean": np.mean(array, axis=0).tolist(),
+            "std": np.std(array, axis=0).tolist(),
+            "q01": np.quantile(array, 0.01, axis=0).tolist(),
+            "q99": np.quantile(array, 0.99, axis=0).tolist(),
+        }
+    return result
+
+
 @lru_cache(maxsize=1)
 def get_direct_lerobot_dataset_class():
     """Build the local subclass lazily so normal recorder tests do not require LeRobot."""
@@ -102,9 +126,13 @@ def get_direct_lerobot_dataset_class():
         def configure_direct_video(
             self,
             *,
-            bitrate: int,
+            bitrates: Mapping[str, int],
         ) -> None:
-            self._direct_video_bitrate = int(bitrate)
+            self._direct_video_bitrates = {
+                str(name): int(value) for name, value in bitrates.items()
+            }
+            self._norm_state_batches: list[np.ndarray] = []
+            self._norm_action_batches: list[np.ndarray] = []
 
         def add_frame(
             self, frame: dict, task: str, timestamp: float | None = None
@@ -139,15 +167,83 @@ def get_direct_lerobot_dataset_class():
             width = int(self.features[image_key]["shape"][1])
             height = int(self.features[image_key]["shape"][0])
 
-            encode_rgb_frames_with_jetson_h264(
+            encode_rgb_frames_with_jetson_av1(
                 frames,
                 video_path,
                 fps=self.fps,
                 label=label,
                 width=width,
                 height=height,
-                bitrate=self._direct_video_bitrate,
+                bitrate=self._direct_video_bitrates[label],
             )
+
+        def _save_target_episode_table(
+            self,
+            prepared: dict[str, list[np.ndarray] | np.ndarray],
+            episode_index: int,
+        ) -> Path:
+            try:
+                import pandas as pd
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+            except ImportError as exc:
+                raise RuntimeError(
+                    "target-compatible Parquet writing requires pandas and pyarrow"
+                ) from exc
+
+            action_key = "action"
+            state_key = "observation.state"
+            columns = {
+                action_key: [
+                    np.asarray(value, dtype=np.float32).tolist()
+                    for value in prepared[action_key]
+                ],
+                state_key: [
+                    np.asarray(value, dtype=np.float32).tolist()
+                    for value in prepared[state_key]
+                ],
+                "timestamp": np.asarray(prepared["timestamp"], dtype=np.float32),
+                "frame_index": np.asarray(prepared["frame_index"], dtype=np.int64),
+                "episode_index": np.asarray(
+                    prepared["episode_index"], dtype=np.int64
+                ),
+                "index": np.asarray(prepared["index"], dtype=np.int64),
+                "task_index": np.asarray(prepared["task_index"], dtype=np.int64),
+            }
+            schema = pa.schema(
+                [
+                    pa.field(action_key, pa.list_(pa.float32())),
+                    pa.field(state_key, pa.list_(pa.float32())),
+                    pa.field("timestamp", pa.float32()),
+                    pa.field("frame_index", pa.int64()),
+                    pa.field("episode_index", pa.int64()),
+                    pa.field("index", pa.int64()),
+                    pa.field("task_index", pa.int64()),
+                ]
+            )
+            table = pa.Table.from_pandas(
+                pd.DataFrame(columns),
+                schema=schema,
+                preserve_index=False,
+                safe=True,
+            )
+            parquet_path = self.root / self.meta.get_data_file_path(episode_index)
+            parquet_path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(table, parquet_path)
+            return parquet_path
+
+        def _write_target_norm_stats(self) -> None:
+            states = np.concatenate(self._norm_state_batches, axis=0)
+            actions = np.concatenate(self._norm_action_batches, axis=0)
+            payload = {"norm_stats": compute_target_norm_stats(states, actions)}
+            output_path = self.root / "norm_stats.json"
+            temporary_path = output_path.with_suffix(".json.tmp")
+            with temporary_path.open("w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary_path, output_path)
 
         def save_episode(self, episode_data: dict | None = None) -> None:
             if episode_data is not None:
@@ -198,10 +294,11 @@ def get_direct_lerobot_dataset_class():
                 )
                 self._encode_direct_video(prepared[image_key], video_path, image_key)
 
-            table_data = {key: prepared[key] for key in self.hf_features}
-            _debug("阶段 7/8：写入 Parquet", f"写入 episode {episode_index} 状态动作和索引")
-            self._save_episode_table(table_data, episode_index)
-            parquet_path = self.root / self.meta.get_data_file_path(episode_index)
+            _debug(
+                "阶段 7/8：写入 Parquet",
+                f"按目标 list<float> schema 写入 episode {episode_index} 状态动作和索引",
+            )
+            parquet_path = self._save_target_episode_table(prepared, episode_index)
             if not parquet_path.is_file():
                 raise RuntimeError(f"Parquet was not created: {parquet_path}")
 
@@ -214,6 +311,17 @@ def get_direct_lerobot_dataset_class():
                 episode_length,
                 episode_tasks,
                 episode_stats,
+            )
+            self._norm_state_batches.append(
+                np.asarray(prepared["observation.state"], dtype=np.float32).copy()
+            )
+            self._norm_action_batches.append(
+                np.asarray(prepared["action"], dtype=np.float32).copy()
+            )
+            self._write_target_norm_stats()
+            _debug(
+                "阶段 7/8：归一化统计",
+                f"已更新全局 norm_stats.json，累计 {sum(len(x) for x in self._norm_state_batches)} 帧",
             )
             self.episode_buffer = self.create_episode_buffer()
 

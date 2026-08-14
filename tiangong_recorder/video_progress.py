@@ -83,7 +83,7 @@ def _stop_subprocess(process: subprocess.Popen) -> None:
         process.wait(timeout=3)
 
 
-def encode_rgb_frames_with_jetson_h264(
+def encode_rgb_frames_with_jetson_av1(
     frames: Sequence[np.ndarray],
     video_path: Path | str,
     *,
@@ -93,12 +93,16 @@ def encode_rgb_frames_with_jetson_h264(
     height: int,
     bitrate: int,
 ) -> None:
-    """Stream RGB NumPy frames into the Jetson nvv4l2 H.264 encoder."""
+    """Encode seekable AV1 with Jetson NVENC, then losslessly remux IVF to MP4."""
     if not frames:
         raise ValueError("cannot encode an empty video")
     video_path = Path(video_path)
     video_path.parent.mkdir(parents=True, exist_ok=True)
     video_path.unlink(missing_ok=True)
+    ivf_path = video_path.with_name(f".{video_path.name}.encoding.ivf")
+    remux_path = video_path.with_name(f".{video_path.stem}.remux.tmp.mp4")
+    ivf_path.unlink(missing_ok=True)
+    remux_path.unlink(missing_ok=True)
 
     command = [
         "gst-launch-1.0",
@@ -120,20 +124,18 @@ def encode_rgb_frames_with_jetson_h264(
         "!",
         "video/x-raw(memory:NVMM),format=NV12",
         "!",
-        "nvv4l2h264enc",
+        "nvv4l2av1enc",
         f"bitrate={bitrate}",
-        "control-rate=0",
+        "control-rate=1",
         "preset-level=2",
         "maxperf-enable=true",
-        "insert-sps-pps=true",
-        f"iframeinterval={fps}",
-        "!",
-        "h264parse",
-        "!",
-        "qtmux",
+        "enable-headers=true",
+        "insert-seq-hdr=true",
+        "iframeinterval=2",
+        "idrinterval=2",
         "!",
         "filesink",
-        f"location={video_path}",
+        f"location={ivf_path}",
     ]
     progress = TerminalProgressBar(label)
     progress.update(0, len(frames), force=True)
@@ -164,6 +166,8 @@ def encode_rgb_frames_with_jetson_h264(
     except KeyboardInterrupt:
         progress.break_line()
         _stop_subprocess(process)
+        ivf_path.unlink(missing_ok=True)
+        remux_path.unlink(missing_ok=True)
         video_path.unlink(missing_ok=True)
         raise
     except Exception as exc:
@@ -179,16 +183,77 @@ def encode_rgb_frames_with_jetson_h264(
             if process.stderr
             else ""
         )
+        ivf_path.unlink(missing_ok=True)
+        remux_path.unlink(missing_ok=True)
         video_path.unlink(missing_ok=True)
         details = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())
         raise HardwareVideoEncodingError(
-            f"Jetson H.264 pipeline failed: {type(exc).__name__}: {exc}; {details[-2000:]}"
+            f"Jetson AV1 pipeline failed: {type(exc).__name__}: {exc}; {details[-2000:]}"
         ) from exc
 
-    if return_code != 0 or not video_path.is_file():
+    if return_code != 0 or not ivf_path.is_file():
+        ivf_path.unlink(missing_ok=True)
+        remux_path.unlink(missing_ok=True)
         video_path.unlink(missing_ok=True)
         details = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())
         raise HardwareVideoEncodingError(
-            f"Jetson H.264 encoder failed with exit code {return_code}: {details[-2000:]}"
+            f"Jetson AV1 encoder failed with exit code {return_code}: {details[-2000:]}"
         )
 
+    print(
+        f"[LeRobot转换][阶段 7/8][MP4封装][{label}] "
+        "硬件AV1编码完成，正在无损remux IVF → MP4",
+        flush=True,
+    )
+    remux_command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "ivf",
+        "-i",
+        str(ivf_path),
+        "-c:v",
+        "copy",
+        "-y",
+        str(remux_path),
+    ]
+    remux_process = subprocess.Popen(
+        remux_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        remux_stdout, remux_stderr = remux_process.communicate()
+    except KeyboardInterrupt:
+        _stop_subprocess(remux_process)
+        ivf_path.unlink(missing_ok=True)
+        remux_path.unlink(missing_ok=True)
+        video_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        _stop_subprocess(remux_process)
+        ivf_path.unlink(missing_ok=True)
+        remux_path.unlink(missing_ok=True)
+        video_path.unlink(missing_ok=True)
+        raise HardwareVideoEncodingError(
+            f"AV1 IVF remux failed: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    if remux_process.returncode != 0 or not remux_path.is_file():
+        details = "\n".join(
+            value.decode("utf-8", errors="replace").strip()
+            for value in (remux_stdout, remux_stderr)
+            if value.strip()
+        )
+        ivf_path.unlink(missing_ok=True)
+        remux_path.unlink(missing_ok=True)
+        video_path.unlink(missing_ok=True)
+        raise HardwareVideoEncodingError(
+            f"AV1 IVF remux failed with exit code {remux_process.returncode}: "
+            f"{details[-2000:]}"
+        )
+
+    remux_path.replace(video_path)
+    ivf_path.unlink(missing_ok=True)

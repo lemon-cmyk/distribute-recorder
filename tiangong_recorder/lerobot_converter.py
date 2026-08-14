@@ -17,7 +17,12 @@ from typing import Any
 import yaml
 
 from .conversion_state import ConversionRecord, ConversionState
-from .lerobot_writer import CAMERA_NAMES, LeRobotV21Writer
+from .lerobot_writer import (
+    CAMERA_NAMES,
+    DEFAULT_VIDEO_BITRATES,
+    OUTPUT_CAMERA_NAMES,
+    LeRobotV21Writer,
+)
 
 
 _DATASET_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -47,7 +52,9 @@ class ConverterConfig:
     action_key: str = "action"
     image_prefix: str = "observation.images"
     image_writer_threads: int = 2
-    direct_video_bitrate: int = 8_000_000
+    direct_video_bitrates: dict[str, int] = field(
+        default_factory=lambda: dict(DEFAULT_VIDEO_BITRATES)
+    )
     camera_color_order: dict[str, str] = field(
         default_factory=lambda: {
             "head": "rgb",
@@ -85,8 +92,15 @@ class ConverterConfig:
             raise ValueError("poll_interval_s must be positive")
         if self.image_writer_threads < 0:
             raise ValueError("image_writer_threads must not be negative")
-        if self.direct_video_bitrate <= 0:
-            raise ValueError("direct_video_bitrate must be positive")
+        if set(self.direct_video_bitrates) != set(OUTPUT_CAMERA_NAMES):
+            raise ValueError(
+                f"direct_video_bitrates must contain exactly {OUTPUT_CAMERA_NAMES}"
+            )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in self.direct_video_bitrates.values()
+        ):
+            raise ValueError("direct_video_bitrates values must be positive integers")
         if set(self.camera_color_order) != set(CAMERA_NAMES):
             raise ValueError(f"camera_color_order must contain exactly {CAMERA_NAMES}")
 
@@ -157,7 +171,7 @@ class PklToLeRobotConverter:
             image_prefix=config.image_prefix,
             camera_color_order=config.camera_color_order,
             image_writer_threads=config.image_writer_threads,
-            direct_video_bitrate=config.direct_video_bitrate,
+            direct_video_bitrates=config.direct_video_bitrates,
         )
 
     @staticmethod
@@ -430,6 +444,10 @@ def main(argv: list[str] | None = None) -> int:
         "程序启动",
         f"FPS={config.fps}，视频模式={config.use_videos}，"
         f"保留源 PKL={not config.delete_source_pkl}，重试失败={config.retry_errors}",
+    )
+    _debug(
+        "程序启动",
+        f"视频编码=Jetson 硬件 AV1，码率={config.direct_video_bitrates}",
     )
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)
