@@ -1,94 +1,158 @@
 from __future__ import annotations
 
+
 # ============================================================================
 # 当前文件：tiangong_recorder/synchronizer.py
 #
 # 【这个文件在整个项目中的职责】
 #
-# 这个文件负责：
+# 当前文件负责：
 #
-#     把“按时间到达的三路相机帧”
-#
-# 和
-#
-#     “按时间到达的机器人 state/action”
-#
-# 根据时间戳进行对齐，最终生成可以保存到 episode PKL 中的一帧帧数据。
+#       “把不同时间到达的 robot state 和三路 camera frame
+#        根据采集时间戳组合成一条完整的训练数据。”
 #
 #
-# 整体数据流大致为：
+# 整个项目中的主要数据链可以理解为：
 #
-#   ROS 2 camera topics
-#          │
-#          ▼
-#   episode_worker.py
-#          │
-#          │ decode_ros_image()
-#          ▼
-#      CameraFrame
-#          │
-#          │ add_camera_frame()
-#          ▼
-#   ┌──────────────────────┐
-#   │                      │
-#   │ LiveEpisodeSynchronizer
-#   │                      │
-#   └──────────────────────┘
-#          ▲
-#          │ add_state()
-#          │
-#   robot state/action
-#          ▲
-#          │
-#   episode_worker.py
-#          ▲
-#          │ ZMQ PULL
-#          │
-#   x86 teleoperation process
-#
-#
-# 然后：
-#
-#   CameraFrame queues
-#          │
-#          ├───────────┐
-#          │           │
-#          ▼           ▼
-#      merge_ready()  pending_states
-#          │
-#          │ 按 _capture_time_ns 对齐
-#          ▼
-#      episode_data
-#          │
-#          ▼
-#   episode_worker.py
-#          │
-#          ▼
-#   write_episode_pickle()
-#          │
-#          ▼
-#       *.pkl
+#       x86 teleoperation process
+#               │
+#               │ robot state/action
+#               │ 约 50 Hz
+#               │ ZMQ
+#               ▼
+#       episode_worker.py
+#               │
+#               │ synchronizer.add_state(state)
+#               │
+#               │
+#       ROS 2 camera topics
+#               │
+#               │ sensor_msgs/Image
+#               ▼
+#       EpisodeCameraNode._camera_callback()
+#               │
+#               ▼
+#       image_decoder.py
+#               │
+#               │ decode_ros_image()
+#               ▼
+#           CameraFrame
+#               │
+#               │ synchronizer.add_camera_frame()
+#               ▼
+#       LiveEpisodeSynchronizer          ← 当前文件
+#               │
+#               │ 按 _capture_time_ns / CameraFrame.timestamp_ns
+#               │ 做时间对齐
+#               ▼
+#           episode_data
+#               │
+#               ▼
+#       episode_worker.py
+#               │
+#               ▼
+#       dataset_writer.py
+#               │
+#               │ write_episode_pickle()
+#               ▼
+#          <episode_id>.pkl
 #
 #
-# 所以这个文件可以理解为整个录制系统中的：
+# 【这里所谓的“对齐”是什么】
 #
-#     “相机数据和机器人状态数据的时间同步/融合模块”
+# robot state 有自己的采集时间：
 #
-# 它本身：
+#       state["_capture_time_ns"]
 #
-#   × 不订阅 ROS topic
-#   × 不接收 ZMQ 网络数据
-#   × 不写 PKL
+# camera frame 有自己的采集时间：
 #
-# 它只负责：
+#       CameraFrame.timestamp_ns
 #
-#   接收已经拿到的 CameraFrame 和 state
-#       ↓
-#   缓存
-#       ↓
-#   根据 timestamp 对齐
-#       ↓
-#   生成 episode_data
+# 对于一条 state：
+#
+#       T_state
+#
+# 正常情况下，每一路相机都选择：
+#
+#       timestamp <= T_state
+#
+# 中时间最接近 T_state 的那一帧，也就是：
+#
+#       latest causal frame
+#       “state 发生之前最近的一张图”
+#
+#
+# 例如某一路 camera：
+#
+#       33ms     66ms     99ms
+#        │        │        │
+#        ▼        ▼        ▼
+#       img0     img1     img2
+#
+#                 state = 80ms
+#
+# 最终选择：
+#
+#       img1 = 66ms
+#
+# 而不是 99ms，
+# 因为 99ms 已经发生在 state 之后。
+#
+#
+# 【为什么还要等待 99ms 这样的未来 frame 到达】
+#
+# 如果当前队列只有：
+#
+#       33ms
+#       66ms
+#
+# 而 state = 80ms，
+#
+# 现在还不能确定 66ms 是最终应该使用的帧，
+# 因为后面可能马上收到：
+#
+#       75ms
+#
+# 所以 merge_ready(force=False) 会等待每一路 camera 的“最新时间戳”
+# 都已经越过 state 时间：
+#
+#       newest_camera_timestamp >= state_timestamp
+#
+# 这相当于用最新 camera timestamp 作为 watermark。
+#
+# 当 watermark 已越过 state，
+# 才可以确定 state 之前不会再正常到达一张时间更近的有序 camera frame。
+#
+#
+# 【最终输出的数据结构】
+#
+# 每个 state 最后变成：
+#
+#       entry = {
+#           ... robot observation/action fields ...,
+#
+#           "image": {
+#               "head": {
+#                   "color": np.ndarray,
+#               },
+#               "left_wrist": {
+#                   "color": np.ndarray,
+#               },
+#               "right_wrist": {
+#                   "color": np.ndarray,
+#               },
+#           },
+#       }
+#
+# 多个 entry 按时间顺序组成：
+#
+#       self.episode_data: list[dict]
+#
+# 后续由 episode_worker.py 交给：
+#
+#       dataset_writer.write_episode_pickle()
+#
+# 写成 PKL。
 # ============================================================================
 
 
@@ -98,43 +162,29 @@ from __future__ import annotations
 # 来源：
 #   Python 标准库 collections。
 #
-#
-# 【它是什么】
-#
 # deque = double-ended queue，双端队列。
 #
-# 相比普通 list：
+# 当前文件主要用它保存两类按时间排列的数据：
 #
-#   deque.popleft()
-#
-# 可以高效地从队列最左侧删除元素。
-#
-#
-# 当前文件中主要用在两个地方：
-#
-#   1. 每一路相机自己的 frame queue
+#   ① 每一路 camera 的 CameraFrame
 #
 #       self.frames["head"]
 #       self.frames["left_wrist"]
 #       self.frames["right_wrist"]
 #
-#
-#   2. 等待和相机对齐的 robot state queue
+#   ② 还没有与 camera 完成匹配的 robot state
 #
 #       self.pending_states
 #
 #
-# 为什么这里适合用 deque：
+# 为什么适合这里：
 #
-#   数据都是按时间顺序进入；
+# 对齐完成以后需要不断删除最旧的数据：
 #
-#   处理时也是从最旧的数据开始；
+#       queue.popleft()
 #
-#   处理完成后需要频繁：
-#
-#       popleft()
-#
-#   删除已经不再需要的数据。
+# deque 从左侧删除元素是 O(1)，
+# 比普通 list 的 pop(0) 更适合这种流式队列。
 # ============================================================================
 from collections import deque
 
@@ -145,114 +195,68 @@ from collections import deque
 # 来源：
 #   Python 标准库 dataclasses。
 #
+# 当前文件用它定义 CameraFrame。
 #
-# 当前用于定义：
+# dataclass 可以把：
 #
-#       CameraFrame
-#
-#
-# CameraFrame 本质上是把一帧相机数据需要的：
-#
-#       timestamp
+#       timestamp_ns
 #       image
 #       encoding
 #
-# 打包成一个对象，
-# 避免在项目中到处分别传三个变量。
+# 这几个本来相互独立的变量封装成一个明确的“相机帧对象”。
 # ============================================================================
 from dataclasses import dataclass
 
 
 # ============================================================================
-# Deque / Dict / Iterable
+# typing
 #
 # 来源：
-#   Python 标准库 typing。
+#   Python 标准库。
 #
+# Deque：
+#   用来表示 deque 的元素类型。
 #
-# 主要用于类型标注。
+# Dict：
+#   表示字典的 key/value 类型。
 #
+# Iterable：
+#   表示“可以被遍历的一组 camera name”。
 #
-# Deque[CameraFrame]
+# 例如 LiveEpisodeSynchronizer 可以接受：
 #
-#   表示：
+#       ["head", "left_wrist", "right_wrist"]
 #
-#       一个双端队列，
-#       其中每个元素都是 CameraFrame。
-#
-#
-# Dict[str, Deque[CameraFrame]]
-#
-#   表示：
-#
-#       key：
-#           camera name
-#
-#       value：
-#           该 camera 对应的 CameraFrame 队列
-#
-#
-# Iterable[str]
-#
-#   表示 camera_names 可以是任何可迭代字符串集合，
-#   例如：
-#
-#       list
-#       tuple
-#       dict_keys
-#
-#
-# 当前项目中实际传进来的通常是：
-#
-#       config.camera_topics.keys()
-#
-# 也就是：
-#
-#       head
-#       left_wrist
-#       right_wrist
+# 也可以接受 tuple、dict_keys 等其他 iterable。
 # ============================================================================
 from typing import Deque, Dict, Iterable
 
 
 # ============================================================================
-# numpy
+# NumPy
 #
 # 来源：
-#   第三方数值计算库 NumPy。
+#   第三方数值计算库 numpy。
 #
+# 当前文件最重要的用途是：
 #
-# 当前文件本身并没有进行复杂的 NumPy 运算，
-# 主要使用：
+#       CameraFrame.image: np.ndarray
 #
-#       np.ndarray
-#
-# 表示一帧已经解码好的图像。
-#
-#
-# 图像 ndarray 的真正创建发生在：
-#
-#       tiangong_recorder/image_decoder.py
-#
-# 其中：
+# 真正的 ndarray 创建发生在 image_decoder.py：
 #
 #       ROS sensor_msgs/Image
 #               │
 #               ▼
-#       np.frombuffer(...)
+#       np.frombuffer(message.data)
 #               │
 #               ▼
-#       reshape(height, width, 3)
+#       H × W × 3 ndarray
 #               │
 #               ▼
-#           np.ndarray
-#               │
-#               ▼
-#          CameraFrame.image
+#       CameraFrame.image
 #
-#
-# 当前 synchronizer.py 主要负责保存和复制这个 ndarray，
-# 而不负责解码 ROS Image。
+# 当前 synchronizer.py 不负责解码图片，
+# 只负责保存、选择和复制这些 ndarray。
 # ============================================================================
 import numpy as np
 
@@ -261,66 +265,57 @@ import numpy as np
 # CameraFrame
 #
 # 定义来源：
-#
-#       当前 synchronizer.py
+#   当前 tiangong_recorder/synchronizer.py。
 #
 #
 # 【它是什么】
 #
-# CameraFrame 是整个 Recorder 内部表示“一帧已经解码好的相机图像”的对象。
+# CameraFrame 是项目内部用于表示“一张已经解码完成的相机图像”的数据对象。
 #
+# 它不是 ROS 原始：
 #
-# 【它通常在哪里创建】
+#       sensor_msgs.msg.Image
+#
+# ROS Image 会先在：
 #
 #       tiangong_recorder/image_decoder.py
 #
-# 中的：
+# 经过：
 #
-#       decode_ros_image(...)
+#       decode_ros_image()
 #
-#
-# 数据链：
-#
-#   ROS sensor_msgs/Image
-#          │
-#          ▼
-#   decode_ros_image()
-#          │
-#          ├── 解析 timestamp
-#          ├── 检查 width / height
-#          ├── 检查 rgb8 / bgr8
-#          ├── np.frombuffer()
-#          └── reshape()
-#          │
-#          ▼
-#      CameraFrame
+# 才被转换成 CameraFrame。
 #
 #
-# 【然后传到哪里】
+# 数据流：
 #
-# episode_worker.py 的相机 callback：
+#       ROS Image
+#           │
+#           ▼
+#       image_decoder.decode_ros_image()
+#           │
+#           ▼
+#       CameraFrame
+#           │
+#           ▼
+#       EpisodeCameraNode._camera_callback()
+#           │
+#           ▼
+#       LiveEpisodeSynchronizer.add_camera_frame()
 #
-#       frame = decode_ros_image(...)
-#                   │
-#                   ▼
-#       synchronizer.add_camera_frame(
-#           camera_name,
-#           frame,
-#       )
 #
+# frozen=True：
 #
-# 所以 CameraFrame 是：
+#   dataclass 创建以后，不允许直接重新赋值：
 #
-#       image_decoder.py
+#       frame.timestamp_ns = ...
 #
-# 和
-#
-#       synchronizer.py
-#
-# 之间的相机数据传输格式。
+#   这样可以避免已经进入同步队列的 frame
+#   在对齐过程中被意外修改时间戳等元数据。
 # ============================================================================
 @dataclass(frozen=True)
 class CameraFrame:
+
     # ========================================================================
     # timestamp_ns
     #
@@ -328,38 +323,31 @@ class CameraFrame:
     #
     #   image_decoder.image_timestamp_ns()
     #
-    # 优先使用：
+    # 优先读取 ROS Image：
     #
-    #   ROS Image.header.stamp
+    #       message.header.stamp.sec
+    #       message.header.stamp.nanosec
     #
-    # 即：
+    # 并转换成：
     #
-    #   stamp.sec * 1_000_000_000
-    #       +
-    #   stamp.nanosec
+    #       timestamp_ns
     #
-    #
-    # 如果 ROS timestamp 无效，
-    # image_decoder 可以使用 fallback timestamp。
-    #
-    #
-    # 单位：
-    #   ns，纳秒。
+    # 如果 ROS header 没有有效时间戳，
+    # image_decoder.py 才会使用 fallback timestamp。
     #
     #
     # 后续用途：
     #
-    #   add_camera_frame()
-    #       ↓
-    #   检查相机帧时间是否单调
+    #       add_camera_frame()
+    #             │
+    #             ├── 检查相机帧时间是否乱序
+    #             │
+    #             ▼
+    #       _select_frame()
+    #             │
+    #             └── 与 state["_capture_time_ns"] 比较
     #
-    #   can_match()
-    #       ↓
-    #   判断是否已经拥有足够新的相机数据
-    #
-    #   _select_frame()
-    #       ↓
-    #   和 state["_capture_time_ns"] 做时间对齐
+    # 这是 camera 和 robot state 时间同步的核心字段。
     # ========================================================================
     timestamp_ns: int
 
@@ -370,31 +358,30 @@ class CameraFrame:
     #
     #   image_decoder.decode_ros_image()
     #
+    # 由 ROS Image.message.data 解码得到。
     #
-    # 类型：
+    # 当前 recorder.yaml 配置期望尺寸：
     #
-    #   np.ndarray
+    #       640 × 480
     #
-    # 一般结构：
+    # 因此通常结构是：
     #
-    #   [height, width, 3]
+    #       np.ndarray
+    #       shape = (480, 640, 3)
+    #       dtype = uint8
     #
     #
-    # 后续去向：
+    # 后续用途：
     #
-    #   CameraFrame
+    #   merge_ready()
     #       ↓
-    #   self.frames[camera_name]
-    #       ↓
-    #   _select_frame()
-    #       ↓
-    #   selected_frames
+    #   selected_frames[camera_name].image.copy()
     #       ↓
     #   entry["image"][camera_name]["color"]
     #       ↓
     #   self.episode_data
     #       ↓
-    #   write_episode_pickle()
+    #   PKL
     # ========================================================================
     image: np.ndarray
 
@@ -403,22 +390,24 @@ class CameraFrame:
     #
     # 来源：
     #
-    #   ROS Image.encoding
-    #       ↓
-    #   image_decoder.decode_ros_image()
+    #   ROS Image.message.encoding
     #
-    # 当前 image_decoder 支持：
+    # image_decoder.py 当前支持：
     #
-    #   rgb8
-    #   bgr8
+    #       rgb8
+    #       bgr8
     #
     #
-    # 当前 synchronizer.py 中：
+    # 注意：
     #
-    #   encoding 不参与时间同步，
-    #   merge_ready() 最终也只把 image 写入 entry。
+    # 当前 synchronizer 在生成最终 entry 时只写：
     #
-    # 所以它目前主要是 CameraFrame 所携带的图像格式元信息。
+    #       selected_frame.image
+    #
+    # 并没有把 encoding 一起写进 episode_data。
+    #
+    # 因此 encoding 当前主要作为 CameraFrame 的图像格式元数据存在，
+    # 不会直接进入最终 PKL entry。
     # ========================================================================
     encoding: str
 
@@ -427,109 +416,74 @@ class CameraFrame:
 # LiveEpisodeSynchronizer
 #
 # 定义来源：
-#
-#       当前 synchronizer.py
+#   当前 synchronizer.py。
 #
 #
 # 【它是什么】
 #
-# 这是一次 episode 内：
+# 这是一次 episode 内部的“实时时间同步器”。
 #
-#       robot state
-#
-# 和
-#
-#       多路 camera frame
-#
-# 的实时时间同步器。
-#
-#
-# 【在哪里创建】
-#
-#       episode_worker.py
-#
-# 中：
+# 一个 episode worker 启动时，
+# episode_worker.py 会创建：
 #
 #       synchronizer = LiveEpisodeSynchronizer(
 #           config.camera_topics.keys()
 #       )
 #
-#
-# config.camera_topics 来源：
+# config.camera_topics 来自：
 #
 #       config/recorder.yaml
 #
-# 当前通常包含：
+# 当前是：
 #
 #       head
 #       left_wrist
 #       right_wrist
 #
 #
-# 【它接收两条数据流】
+# 【输入】
 #
-# 第一条：相机
+# 两条独立的数据流：
 #
-#   ROS camera
-#       ↓
-#   EpisodeCameraNode._camera_callback()
-#       ↓
-#   decode_ros_image()
-#       ↓
-#   CameraFrame
-#       ↓
-#   add_camera_frame()
-#       ↓
-#   self.frames
+#   Camera：
 #
-#
-# 第二条：robot state/action
-#
-#   x86 teleoperation process
-#       ↓
-#   ZMQ
-#       ↓
-#   episode_worker.state_socket.recv_pyobj()
-#       ↓
-#   state dict
-#       ↓
-#   add_state()
-#       ↓
-#   self.pending_states
+#       ROS 2
+#         ↓
+#       EpisodeCameraNode
+#         ↓
+#       decode_ros_image()
+#         ↓
+#       CameraFrame
+#         ↓
+#       add_camera_frame()
 #
 #
-# 【真正同步发生在哪里】
+#   Robot：
 #
-#       merge_ready()
+#       x86 teleoperation process
+#         ↓
+#       ZMQ
+#         ↓
+#       episode_worker.state_socket
+#         ↓
+#       recv_pyobj()
+#         ↓
+#       state: dict
+#         ↓
+#       add_state()
 #
 #
-# 【同步后的结果】
+# 【输出】
 #
 #       self.episode_data
 #
-# 最终被 episode_worker 传给：
+# 后续：
 #
-#       write_episode_pickle(
-#           episode_id,
-#           synchronizer.episode_data,
-#           config.output_dir,
-#       )
-#
-#
-# 所以这个类的核心关系可以理解成：
-#
-#           camera queues
-#               │
-#               │
-#               ▼
-#          merge_ready()
-#               ▲
-#               │
-#               │
-#         pending_states
-#               │
-#               ▼
-#          episode_data
+#       episode_worker.py
+#           ↓
+#       write_episode_pickle()
+#           ↓
+#       /home/nvidia/teleop_logs/<episode_id>.pkl
 # ============================================================================
 class LiveEpisodeSynchronizer:
     """Causally aligns ordered camera frames with ordered robot states."""
@@ -537,61 +491,41 @@ class LiveEpisodeSynchronizer:
     # ========================================================================
     # INTERNAL_STATE_KEYS
     #
-    # 【来源】
+    # 这些字段来自 x86 发送过来的 robot state。
     #
-    # 这些 key 来自 x86 发给 episode_worker 的 robot state dict。
+    # 它们用于 recorder 内部：
     #
-    # 当前 synchronizer 依赖其中至少：
+    #       _episode_id
+    #           用于确认 state 属于哪个 episode。
     #
-    #   _capture_time_ns
+    #       _frame_index
+    #           用于 episode_worker 检查 state 是否连续：
     #
-    # 来执行时间同步。
+    #               0, 1, 2, 3, ...
     #
-#
-    # episode_worker 还会直接使用：
+    #       _capture_time_ns
+    #           robot state 的采集时间，
+    #           synchronizer 用它和 camera timestamp 做对齐。
     #
-    #   _episode_id
-    #       检查 state 属于当前 episode。
     #
-    #   _frame_index
-    #       检查 state 是否连续。
+    # 这三个字段属于：
     #
-#
-    # 【为什么叫 INTERNAL_STATE_KEYS】
+    #       Recorder 的传输/同步元数据
     #
-    # 这些字段是 Recorder 内部进行：
+    # 而不是最终训练 sample 本身希望保留的数据。
     #
-    #   episode 校验
-    #   frame 顺序校验
-    #   时间同步
-    #
-    # 使用的“内部元数据”。
-    #
-    # 它们不是最终机器人训练样本中的业务 state/action。
-    #
-#
-    # 【最终去向】
-    #
-    # merge_ready() 创建 entry 时：
+    # 所以 merge_ready() 构建最终 entry 时会过滤：
     #
     #       if key not in self.INTERNAL_STATE_KEYS
     #
-    # 会把这些内部字段过滤掉。
+    # 最终不会写进 episode_data。
     #
-   #
-    # 因此：
     #
-    #   原始 state
+    # 注意：
     #
-    #       {
-    #           "_episode_id": ...,
-    #           "_frame_index": ...,
-    #           "_capture_time_ns": ...,
-    #           robot_state: ...,
-    #           action: ...,
-    #       }
-    #
-    # 最终 episode_data entry 中不会保留这些 "_" 内部 key。
+    # 这个 distribute-recorder 仓库负责“接收”这些字段；
+    # x86 teleoperation process 的 state 构造逻辑不在当前
+    # synchronizer.py 中。
     # ========================================================================
     INTERNAL_STATE_KEYS = {
         "_episode_id",
@@ -600,377 +534,258 @@ class LiveEpisodeSynchronizer:
     }
 
     def __init__(self, camera_names: Iterable[str]):
-        # ====================================================================
-        # __init__()
-        #
-       # 调用来源：
-        #
-        #   episode_worker.py
-        #
-        #       LiveEpisodeSynchronizer(
-        #           config.camera_topics.keys()
-        #       )
-        #
-       #
-        # camera_names 实际来源：
-        #
-        #   config/recorder.yaml
-        #           ↓
-        #   RecorderConfig.camera_topics
-        #           ↓
-        #   config.camera_topics.keys()
-        #
-       # 当前默认通常为：
-        #
-        #   head
-        #   left_wrist
-        #   right_wrist
-        #
-       #
-        # __init__ 的目标：
-        #
-        #   为当前 episode 初始化：
-        #
-        #       相机缓存
-        #       state 缓存
-        #       最终 episode_data
-        #       对齐统计信息
-        # ====================================================================
 
         # ====================================================================
-        # 局部功能块：固定当前 episode 使用的 camera 名称
+        # 局部功能块：固定本次同步器需要处理的 camera 列表
         #
-        # 输入：
+        # 输入来源：
         #
         #   camera_names
+        #       ← episode_worker.py
         #       ← config.camera_topics.keys()
+        #       ← config/recorder.yaml
         #
-       #
-        # 当前处理：
+        # 当前默认得到：
         #
-        #   tuple(camera_names)
+        #       "head"
+        #       "left_wrist"
+        #       "right_wrist"
         #
-       # 把可能是 dict_keys / list 等 Iterable
-        # 固定成不可变顺序的 tuple。
         #
-       #
-        # 例如：
+        # tuple(camera_names)：
         #
-        #   (
-        #       "head",
-        #       "left_wrist",
-        #       "right_wrist",
-        #   )
+        #   把传入的 iterable 固定成 tuple，
+        #   之后整个 episode 都使用同一组 camera。
         #
-       #
+        #
         # 输出：
         #
-        #   self.camera_names
+        #       self.camera_names
         #
-       #
-        # 后续几乎整个类都会使用：
+        # 后续传给/用于：
         #
-        #   ├── 初始化 self.frames
-        #   ├── cameras_ready()
-        #   ├── can_match()
-        #   ├── merge_ready()
-        #   └── alignment_summary()
-        #
-       # 来确保所有 camera 都参与同步。
+        #       self.frames 初始化
+        #       cameras_ready()
+        #       can_match()
+        #       merge_ready()
+        #       alignment_summary()
         # ====================================================================
         self.camera_names = tuple(camera_names)
 
         # ====================================================================
-        # 局部功能块：为每一路 camera 创建独立的 frame queue
+        # 局部功能块：为每一路 camera 创建独立的时间有序帧队列
         #
-        # 输入：
+        # 输入来源：
         #
-        #   self.camera_names
+        #       self.camera_names
         #
-       #
-        # 当前处理：
+        # 当前形成：
         #
-        #   每一个 camera_name：
-        #
-        #       name → deque()
-        #
-       # 构造：
-        #
-        #   self.frames
-        #
-       # 结构类似：
-        #
-        #   {
-        #       "head": deque([...]),
-        #       "left_wrist": deque([...]),
-        #       "right_wrist": deque([...]),
+        #   self.frames = {
+        #       "head": deque(),
+        #       "left_wrist": deque(),
+        #       "right_wrist": deque(),
         #   }
         #
-       #
-        # 每个 deque 内按照 timestamp 顺序保存：
         #
-        #   CameraFrame
+        # 每个 deque 后续接收：
         #
-       #
-        # 数据之后从哪里进入：
+        #       CameraFrame
         #
-        #   episode_worker camera callback
-        #       ↓
-        #   add_camera_frame()
-        #       ↓
-        #   self.frames[camera_name].append(frame)
+        # 来源：
         #
-       #
-        # 数据之后到哪里：
+        #       EpisodeCameraNode._camera_callback()
+        #           ↓
+        #       decode_ros_image()
+        #           ↓
+        #       add_camera_frame(camera_name, frame)
         #
-        #   cameras_ready()
-        #   can_match()
-        #   _select_frame()
-        #   merge_ready()
-        #   _prune_before_selected()
         #
-       # 共同使用这些 frame queues。
+        # 后续主要被：
+        #
+        #       cameras_ready()
+        #       can_match()
+        #       _select_frame()
+        #       _prune_before_selected()
+        #       merge_ready()
+        #
+        # 使用。
         # ====================================================================
         self.frames: Dict[str, Deque[CameraFrame]] = {
             name: deque() for name in self.camera_names
         }
 
         # ====================================================================
-        # 局部功能块：初始化待匹配 robot state 队列
+        # 局部功能块：创建“等待与相机匹配的 state”队列
         #
-        # 初始：
-        #
-        #   空 deque。
-        #
-       #
         # 数据来源：
         #
-        #   episode_worker.py
-        #
-        #       state = state_socket.recv_pyobj()
+        #       x86 teleoperation process
+        #           ↓
+        #       ZMQ
+        #           ↓
+        #       episode_worker.state_socket.recv_pyobj()
         #           ↓
         #       synchronizer.add_state(state)
         #
-       #
-        # add_state() 最终：
+        # add_state() 会把 state append 到这里。
         #
-        #   self.pending_states.append(state)
         #
-       #
-        # 数据去向：
+        # 后续：
         #
-        #   merge_ready()
+        #       merge_ready()
         #
-       # 会始终从：
+        # 总是从：
         #
-        #   self.pending_states[0]
+        #       self.pending_states[0]
         #
-       # 即最早一个还没有匹配相机的 state 开始处理。
+        # 取最早的一条 state 进行对齐。
         #
-       # 匹配完成后：
+        # 对齐完成以后：
         #
-        #   self.pending_states.popleft()
+        #       self.pending_states.popleft()
+        #
+        # 删除该 state。
         # ====================================================================
         self.pending_states: Deque[dict] = deque()
 
         # ====================================================================
-        # 局部功能块：初始化最终 episode 样本列表
+        # 局部功能块：创建最终 episode 数据缓存
         #
-        # episode_data：
+        # 初始：
         #
-        #   最终完成：
+        #       []
         #
-        #       robot state/action
-        #           +
-        #       三路同步图像
+        # 数据由：
         #
-        # 后形成的一帧帧 episode sample。
+        #       merge_ready()
         #
-       #
-        # 初始为空：
+        # 一条一条 append。
         #
-        #   []
         #
-       #
-        # 数据来源：
+        # 每个元素大致：
         #
-        #   merge_ready()
+        #       {
+        #           ... robot state/action ...,
+        #           "image": {
+        #               "head": {"color": ...},
+        #               "left_wrist": {"color": ...},
+        #               "right_wrist": {"color": ...},
+        #           }
+        #       }
         #
-       # 每成功匹配一个 state：
         #
-        #   self.episode_data.append(entry)
+        # 后续去向：
         #
-       #
-        # 最终去向：
-        #
-        #   episode_worker.py
-        #
+        #       episode_worker.py
+        #           ↓
         #       write_episode_pickle(
         #           episode_id,
         #           synchronizer.episode_data,
         #           config.output_dir,
         #       )
         #
-       # 因此它实际上就是当前 episode 最终要保存的主体数据。
+        # 最终写成 PKL。
         # ====================================================================
         self.episode_data: list[dict] = []
 
         # ====================================================================
-        # 局部功能块：记录“乱序相机帧”的丢弃数量
+        # 局部功能块：统计被丢弃的乱序 camera frame
         #
-        # 初始结构：
+        # 每一路 camera 单独统计。
         #
-        #   {
-        #       "head": 0,
-        #       "left_wrist": 0,
-        #       "right_wrist": 0,
-        #   }
+        # 初始：
         #
-       #
-        # 更新位置：
+        #       0
         #
-        #   add_camera_frame()
+        # add_camera_frame() 如果发现：
         #
-       # 如果新 frame：
+        #       新 frame.timestamp
+        #           <
+        #       当前队尾 frame.timestamp
         #
-        #   frame.timestamp_ns
+        # 就认为新帧是 out-of-order，
+        # 不把它加入同步队列，并将计数 +1。
         #
-       # 小于 queue 最后一帧 timestamp：
         #
-        #   说明发生时间乱序，
-       #   当前 frame 不加入 queue，
-       #   这个计数 +1。
+        # 后续去向：
         #
-       #
-        # 最终去向：
+        #       alignment_summary()
         #
-        #   alignment_summary()
-        #
-       # 作为：
-        #
-        #   dropped_out_of_order_images
-        #
-       # 返回。
-        #
-       # episode_worker 保存完成后会把 alignment_summary()
-       # 放进 `"saved"` 状态消息返回 RecorderServer。
+        # 最终随 worker 的 "saved" 消息返回，
+        # 用于诊断 camera 时间序列是否异常。
         # ====================================================================
         self.dropped_out_of_order_images: Dict[str, int] = {
             name: 0 for name in self.camera_names
         }
 
         # ====================================================================
-        # 局部功能块：统计 fallback frame 使用次数
+        # 局部功能块：统计 fallback frame 匹配次数
         #
-        # fallback 的含义：
+        # 正常匹配希望找到：
         #
-       # 某一个 state timestamp：
+        #       frame.timestamp_ns <= state_timestamp_ns
         #
-        #       T_state
+        # 中最近的一帧。
         #
-       # 理想情况下希望找到：
+        # 但如果当前 camera 队列中所有帧都比 state 更新：
         #
-        #       timestamp <= T_state
+        #       frame.timestamp_ns > state_timestamp_ns
         #
-       # 的最新 camera frame。
-        #
-       # 如果 camera queue 中所有 frame 都比 state 新：
-        #
-        #       frame.timestamp > T_state
-        #
-       # 就不存在过去/同时刻的帧。
-        #
-       # 此时 _select_frame() 会退化选择：
+        # _select_frame() 就只能退化选择：
         #
         #       queue[0]
         #
-       # 即当前最早的一帧，
-       # 并返回：
+        # 也就是当前保存的最早一张图。
         #
-        #       used_fallback = True
+        # 每发生一次这种情况：
         #
-       #
-        # 当前计数：
+        #       fallback_matches[camera] += 1
         #
-        #   self.fallback_matches[camera_name] += 1
         #
-       # 最终进入 alignment_summary()。
+        # 后续进入 alignment_summary()，
+        # 用于诊断同步开始阶段或时钟异常。
         # ====================================================================
         self.fallback_matches: Dict[str, int] = {
             name: 0 for name in self.camera_names
         }
 
         # ====================================================================
-        # 局部功能块：统计每一路 camera 完成了多少次对齐
+        # 局部功能块：初始化时间对齐误差统计
         #
-        # 每次 merge_ready() 成功处理一个 state：
+        # alignment_count：
+        #   已经完成多少次 state-camera 匹配。
         #
-        #   每个 camera 都选择一帧，
-        #   因此：
+        # alignment_abs_sum_ns：
+        #   所有 |state_timestamp - camera_timestamp| 的累计值。
         #
-        #       alignment_count[camera] += 1
+        # alignment_abs_max_ns：
+        #   到目前为止最大的绝对时间差。
         #
-       #
-        # 最终用于：
         #
-        #   alignment_summary()
+        # 这些变量在：
         #
-       # 计算：
+        #       merge_ready()
         #
-        #   mean_abs_delta_ms
+        # 每成功生成一条 entry 时更新。
+        #
+        # 后续：
+        #
+        #       alignment_summary()
+        #
+        # 转换成：
+        #
+        #       mean_abs_delta_ms
+        #       max_abs_delta_ms
+        #
+        # 用来判断相机和 robot state 的同步质量。
         # ====================================================================
         self.alignment_count: Dict[str, int] = {
             name: 0 for name in self.camera_names
         }
-
-        # ====================================================================
-        # 局部功能块：累计 state 与 camera frame 的绝对时间差
-        #
-        # merge_ready() 中：
-        #
-        #   delta_ns =
-        #       state_timestamp_ns
-        #       -
-        #       selected.timestamp_ns
-        #
-        #   abs_delta_ns = abs(delta_ns)
-        #
-       #
-        # 每次累加：
-        #
-        #   alignment_abs_sum_ns[camera] += abs_delta_ns
-        #
-       #
-        # 最终：
-        #
-        #   sum / count
-        #
-       # 得到每一路 camera 平均时间对齐误差。
-        # ====================================================================
         self.alignment_abs_sum_ns: Dict[str, int] = {
             name: 0 for name in self.camera_names
         }
-
-        # ====================================================================
-        # 局部功能块：记录最大绝对时间对齐误差
-        #
-        # 每次 merge_ready()：
-        #
-        #   max(
-        #       当前最大值,
-        #       当前 abs_delta_ns
-        #   )
-        #
-       # 最终：
-        #
-        #   alignment_summary()
-        #
-       # 返回：
-        #
-        #   max_abs_delta_ms
-        #
-       # 用于观察某一路 camera 最差的同步偏差。
-        # ====================================================================
         self.alignment_abs_max_ns: Dict[str, int] = {
             name: 0 for name in self.camera_names
         }
@@ -979,354 +794,260 @@ class LiveEpisodeSynchronizer:
         # ====================================================================
         # add_camera_frame()
         #
-       # 【调用来源】
+        # 调用来源：
         #
-        #   episode_worker.py
+        #       episode_worker.py
+        #           ↓
+        #       EpisodeCameraNode._camera_callback()
+        #           ↓
+        #       decode_ros_image()
+        #           ↓
+        #       frame: CameraFrame
+        #           ↓
+        #       synchronizer.add_camera_frame(camera_name, frame)
         #
-       # 相机 callback 内：
-        #
-        #   ROS Image
-        #       ↓
-        #   decode_ros_image()
-        #       ↓
-        #   frame: CameraFrame
-        #       ↓
-        #   synchronizer.add_camera_frame(
-        #       camera_name,
-        #       frame,
-        #   )
-        #
-       #
-        # camera_name 来源：
-        #
-        #   config.camera_topics
-        #
-       # 例如：
-        #
-        #   "head"
-        #   "left_wrist"
-        #   "right_wrist"
-        #
-       #
-        # frame 来源：
-        #
-        #   image_decoder.decode_ros_image()
-        #
-       #
-        # 【函数目标】
-        #
-       # 把新的 CameraFrame 加入对应 camera 的时间有序队列。
-        #
-       # 如果发现 timestamp 倒退，
-       # 就丢弃该帧。
-        # ====================================================================
-
-        # ====================================================================
-        # 局部功能块：找到当前 camera 对应的 frame queue
         #
         # 输入：
         #
         #   camera_name
-        #       ← episode_worker callback
+        #       ← config.camera_topics 中的 key
         #
-       # self.frames：
+        #       当前通常是：
+        #           head
+        #           left_wrist
+        #           right_wrist
+        #
+        #   frame
+        #       ← image_decoder.decode_ros_image()
+        #
+        #
+        # 目标：
+        #
+        #       保证每一路 self.frames[camera_name]
+        #       中的 CameraFrame 按 timestamp 非递减排列。
+        # ====================================================================
+
+        # ====================================================================
+        # 局部功能块：取得对应 camera 的帧队列
+        #
+        # camera_name：
+        #   ← _camera_callback()
+        #
+        # self.frames：
         #   ← __init__()
         #
-       #
-        # 例如：
+        # 输出 queue：
         #
-        #   camera_name = "head"
+        #   例如 camera_name == "head"：
         #
-       # 得到：
+        #       queue = self.frames["head"]
         #
-        #   queue = self.frames["head"]
-        #
-       #
-        # queue 后续用于：
-        #
-        #   检查最后一帧 timestamp
-        #   append 新 frame
+        # 后续用于检查时间顺序并 append 新帧。
         # ====================================================================
         queue = self.frames[camera_name]
 
         # ====================================================================
-        # 局部功能块：检查新相机帧是否发生时间乱序
+        # 局部功能块：拒绝时间戳倒退的 camera frame
         #
-        # queue：
-        #   当前 camera 已经缓存的 frame。
+        # queue[-1]：
+        #   当前已经接收到的最新 camera frame。
         #
-       # queue[-1]：
-        #   当前最新一帧。
-        #
-       # frame：
+        # frame：
         #   新到达的 CameraFrame。
         #
-       #
-        # 判断：
         #
-        #   frame.timestamp_ns
-        #       <
-        #   queue[-1].timestamp_ns
+        # 如果：
         #
-       # 如果成立：
+        #       frame.timestamp_ns < queue[-1].timestamp_ns
         #
-        #   新来的帧 timestamp 比已经收到的最后一帧还早，
-       #   说明输入不是单调时间顺序。
+        # 表示新收到的图像在采集时间上反而更早。
         #
-       #
-        # 当前处理：
+        # 如果允许它进入队列：
         #
-        #   dropped_out_of_order_images += 1
+        #       _select_frame()
         #
-       # 并：
+        # 就不能再依赖“队列按时间排序”这一前提。
         #
-        #   return False
+        # 所以：
         #
-       #
-        # 也就是说：
+        #   ① 不加入 queue
+        #   ② dropped_out_of_order_images += 1
+        #   ③ return False
         #
-        #   这个 frame 不会进入 self.frames，
-       #   后续 merge_ready() 完全不会看到它。
+        #
+        # dropped 统计之后会进入：
+        #
+        #       alignment_summary()
         # ====================================================================
         if queue and frame.timestamp_ns < queue[-1].timestamp_ns:
             self.dropped_out_of_order_images[camera_name] += 1
             return False
 
         # ====================================================================
-        # 局部功能块：加入当前 camera 的有序缓存
+        # 局部功能块：接受合法 camera frame
         #
-        # 到这里说明：
+        # 经过上面的检查后：
         #
-        #   queue 为空
+        #       queue
         #
-       # 或：
+        # 继续保持时间有序。
         #
-        #   frame.timestamp_ns >= 最后一帧 timestamp
+        # 新 frame 后续由：
         #
-       #
-        # 因此可以：
+        #       can_match()
+        #       _select_frame()
+        #       merge_ready()
         #
-        #   queue.append(frame)
-        #
-       #
-        # 数据去向：
-        #
-        #   self.frames[camera_name]
-        #       ↓
-        #   cameras_ready()
-        #       判断所有 camera 是否已经有数据
-        #
-        #   can_match()
-        #       判断是否有足够时间范围的数据
-        #
-        #   _select_frame()
-        #       为某个 state 选择 camera frame
-        #
-       # 最终进入：
-        #
-        #   merge_ready()
+        # 使用。
         # ====================================================================
         queue.append(frame)
-
-        # ====================================================================
-        # True：
-        #
-        #   表示当前 frame 已经成功加入同步缓存。
-        #
-       # 当前 episode_worker 没有使用这个返回值，
-       # 但接口本身可以让调用者判断：
-        #
-        #   True  → accepted
-        #   False → timestamp 乱序被丢弃
-        # ====================================================================
         return True
 
     def add_state(self, state: dict) -> None:
         # ====================================================================
         # add_state()
         #
-       # 【调用来源】
+        # 输入 state 的直接来源：
         #
-        # episode_worker.py：
+        #       episode_worker.py
+        #           ↓
+        #       state_socket.recv_pyobj()
         #
-        #   state_socket.poll()
-        #       ↓
-        #   state_socket.recv_pyobj()
-        #       ↓
-        #   state
+        # 更上游：
         #
-       # episode_worker 先检查：
+        #       x86 teleoperation process
+        #           ↓
+        #       ZMQ PUSH/PULL 数据通道
+        #           ↓
+        #       Orin episode worker
+        #
+        #
+        # episode_worker 在调用 add_state() 以前已经检查：
         #
         #   state["_episode_id"]
+        #       是否与当前 episode_id 相同
+        #
         #   state["_frame_index"]
+        #       是否与 received_state_count 连续
         #
-       # 然后：
         #
-        #   synchronizer.add_state(state)
+        # 当前函数进一步负责：
         #
-       #
-        # 所以 state 的更上游来源是：
-        #
-        #   x86 teleoperation process
-        #       ↓ ZMQ
-        #   episode_worker state PULL socket
-        #       ↓
-        #   当前函数
-        #
-       #
-        # 【函数目标】
-        #
-       # 保证 state 的 _capture_time_ns 单调，
-       # 然后把它加入 pending_states，
-       # 等待相机数据与它对齐。
+        #       检查 state 的采集 timestamp 是否保持单调，
+        #       然后加入 pending_states。
         # ====================================================================
 
         # ====================================================================
-        # 局部功能块：提取当前 state 的采集 timestamp
+        # 局部功能块：提取 robot state 的采集时间
         #
-        # state：
-        #   ← x86 发送过来的 state dict。
+        # 来源：
         #
-       # _capture_time_ns：
+        #       state["_capture_time_ns"]
         #
-        #   Recorder 内部使用的 state capture timestamp。
+        # 这是由 x86 state 数据携带过来的同步元数据。
         #
-       #
-        # 当前处理：
+        # int()：
+        #   将其统一转换成 Python int。
         #
-        #   int(...)
         #
-       # 确保后续时间比较使用整数。
+        # 输出：
         #
-       #
-        # timestamp_ns 去向：
+        #       timestamp_ns
         #
-       # 下一段用于检查：
+        # 后续：
         #
-        #   当前 state timestamp
-       #   是否小于上一条 pending state timestamp。
+        #       与上一条 pending state 的时间比较。
+        #
+        # state 本身则在随后 append 到 pending_states，
+        # 最终 merge_ready() 再次读取这个字段，
+        # 与 CameraFrame.timestamp_ns 做匹配。
         # ====================================================================
         timestamp_ns = int(state["_capture_time_ns"])
 
         # ====================================================================
-        # 局部功能块：保证 robot state timestamp 单调递增
+        # 局部功能块：验证 pending state 的 timestamp 单调性
         #
-       # self.pending_states：
-        #   ← __init__() 创建。
+        # self.pending_states[-1]：
+        #   当前尚未完成 camera 匹配的最后一条 state。
         #
-       # 如果里面已经有 state：
-        #
-        #   self.pending_states[-1]
-        #
-       # 就是最近加入的上一条未处理 state。
-        #
-       #
         # previous：
+        #   它的 _capture_time_ns。
         #
-        #   ← 上一条 state["_capture_time_ns"]
         #
-       #
-        # 判断：
+        # 如果：
         #
-        #   当前 timestamp_ns < previous
+        #       当前 timestamp < previous
         #
-       # 如果成立：
+        # 说明 robot state 时间发生倒退。
         #
-        #   robot state 时间顺序发生倒退。
-        #
-       # 这会破坏后面按队列顺序执行的因果匹配逻辑，
-       # 所以直接：
-        #
-        #   raise ValueError
-        #
-       #
-        # 异常会继续传回：
-        #
-        #   episode_worker
-        #       ↓
-       #   worker except Exception
-        #       ↓
-        #   {"type": "error"}
-        #       ↓ Pipe
-        #   RecorderServer
+        # 因为 merge_ready() 默认认为 pending_states
+        # 是按照采集时间排列的，
+        # 此时直接抛 ValueError，不允许继续同步。
         # ====================================================================
         if self.pending_states:
             previous = int(self.pending_states[-1]["_capture_time_ns"])
-
             if timestamp_ns < previous:
                 raise ValueError("state timestamps must be monotonic")
 
         # ====================================================================
-        # 局部功能块：加入等待同步的 state queue
+        # 局部功能块：把 state 放入待匹配队列
         #
-        # state：
-       #   已通过 timestamp 顺序检查。
+        # 输入：
         #
-       # 当前处理：
+        #       state
         #
-        #   pending_states.append(state)
+        # 输出：
         #
-       #
-        # 数据去向：
+        #       self.pending_states
         #
-        #   merge_ready()
+        # 后续：
         #
-       # 其中始终先取：
+        #       merge_ready()
         #
-        #   self.pending_states[0]
-        #
-       # 即最早一个尚未匹配相机的 state。
-        #
-       # 成功匹配之后：
-        #
-        #   pending_states.popleft()
+        # 会始终从 pending_states[0]
+        # 处理最早尚未完成匹配的 state。
         # ====================================================================
         self.pending_states.append(state)
 
     def cameras_ready(self) -> bool:
         # ====================================================================
-        # cameras_ready()
+        # 局部功能块：检查所有 camera 是否至少有一张图
         #
-       # 作用：
+        # 数据来源：
         #
-        #   判断所有需要的 camera 是否至少已经缓存了一帧图像。
+        #       self.frames
+        #           ← add_camera_frame()
         #
-       #
-        # self.camera_names：
+        # all(...) 要求：
         #
-        #   ← __init__()
+        #       head queue 非空
+        #       AND
+        #       left_wrist queue 非空
+        #       AND
+        #       right_wrist queue 非空
         #
-       # self.frames[name]：
         #
-        #   ← add_camera_frame() 持续写入。
+        # 输出：
         #
-       #
-        # 例如：
+        #       True / False
         #
-        #   head queue        非空
-        #   left_wrist queue  非空
-        #   right_wrist queue 非空
         #
-       # 才返回 True。
+        # 主要去向：
         #
-       #
-        # 调用去向：
+        #   ① episode_worker.py
         #
-        #   1. episode_worker
+        #       synchronizer.cameras_ready()
         #
-       #       synchronizer.cameras_ready()
+        #       所有 camera 首帧到齐以后，
+        #       worker 才向 RecorderServer 发送 "ready"。
         #
-       #       用来判断 worker 是否可以向 RecorderServer
-       #       发送 ready。
+        #   ② can_match()
         #
-       #   2. can_match()
+        #       判断某条 state 是否已经具备匹配条件。
         #
-       #       检查是否具备匹配基础。
+        #   ③ merge_ready()
         #
-       #   3. merge_ready()
-        #
-       #       如果 camera 尚未全部 ready，
-       #       暂停处理 pending state。
+        #       如果 camera 还没全部准备好就停止 merge。
         # ====================================================================
         return all(self.frames[name] for name in self.camera_names)
 
@@ -1334,95 +1055,71 @@ class LiveEpisodeSynchronizer:
         # ====================================================================
         # can_match()
         #
-       # 输入来源：
+        # 作用：
         #
-        #   state_timestamp_ns
+        #   判断“现在是否已经可以安全地处理这个 state”。
         #
-        # 通常来自 merge_ready()：
         #
-        #   state = pending_states[0]
-        #       ↓
-        #   state["_capture_time_ns"]
+        # state_timestamp_ns 来源：
         #
-       #
-        # 【这个函数解决的问题】
+        #       merge_ready()
+        #           ↓
+        #       state["_capture_time_ns"]
         #
-       # 假设现在要处理：
         #
-        #   state timestamp = 100
+        # 第一层条件：
         #
-       # 某 camera 当前只收到：
+        #       self.cameras_ready()
         #
-        #   80
-        #   90
+        # 所有 camera 至少必须有一帧。
         #
-       # 那么现在还不能确定：
         #
-        #   90
+        # 第二层条件：
         #
-       # 就是 state=100 最合适的历史 frame。
+        # 对每一路 camera：
         #
-       # 因为下一帧：
+        #       self.frames[name][-1].timestamp_ns
+        #           >=
+        #       state_timestamp_ns
         #
-        #   99
+        # 即该 camera 当前最新帧的时间已经“越过”这条 state。
         #
-       # 可能马上到。
         #
-       # 所以这里要求：
+        # 可以把：
         #
-        #   每一路 camera 的“最新一帧”
+        #       frames[name][-1].timestamp_ns
         #
-       # timestamp 都已经：
+        # 理解成该 camera 当前的时间 watermark。
         #
-        #   >= state_timestamp_ns
         #
-       # 这样说明该 camera 的数据时间线已经至少走过 state 时刻，
-       # 才可以稳定地从历史 frame 中选择最后一个 <= state timestamp 的帧。
+        # 为什么需要这个 watermark：
         #
-       #
-        # 这就是类注释中：
+        # 假设 state = 100ms，
+        # 当前 camera 只有：
         #
-        #   "Causally aligns"
+        #       70ms
         #
-       # 的核心之一。
-        # ====================================================================
-
-        # ====================================================================
-        # 第一部分：
+        # 不能马上选择 70ms，
+        # 因为后面可能还有：
         #
-        #   self.cameras_ready()
+        #       90ms
         #
-       # 确保每一路 camera queue 至少非空。
+        # 当已经收到：
         #
-       #
-        # 第二部分：
+        #       110ms
         #
-       # 对每个 camera：
+        # 且 camera frame 保持有序时，
+        # 才能认为 state=100ms 之前正常到达的帧已经收齐，
+        # 此时再从中寻找“<=100ms 的最近一帧”。
         #
-        #   self.frames[name][-1]
         #
-       # 是最新 frame。
+        # 输出：
         #
-       # 要求：
+        #       True
+        #           → merge_ready() 可以调用 _select_frame()
         #
-        #   latest.timestamp_ns >= state_timestamp_ns
-        #
-       #
-        # 如果任意一路 camera 还没有走到该 state timestamp：
-        #
-        #   return False
-        #
-       #
-        # 输出去向：
-        #
-        #   merge_ready()
-        #
-       # 如果 False：
-        #
-        #   break
-        #
-       # 当前 state 暂时继续留在 pending_states，
-       # 等更多 camera frame 到来。
+        #       False
+        #           → merge_ready() 暂停，等待更多 camera frame。
         # ====================================================================
         return self.cameras_ready() and all(
             self.frames[name][-1].timestamp_ns >= state_timestamp_ns
@@ -1437,169 +1134,117 @@ class LiveEpisodeSynchronizer:
         # ====================================================================
         # _select_frame()
         #
-       # staticmethod：
+        # 这是实际执行：
         #
-       # 这个函数不访问：
+        #       “给一条 state 选哪张 camera image”
         #
-        #   self
+        # 的核心函数。
         #
-       # 只根据：
         #
-        #   一个 camera queue
-        #   一个 state timestamp
-        #
-       # 完成 frame 选择。
-        #
-       #
-        # 调用来源：
-        #
-        #   merge_ready()
-        #
-       # 对每一路 camera 都调用一次。
-        #
-       #
         # 输入 queue：
         #
-        #   self.frames[camera_name]
+        #       self.frames[camera_name]
         #
-       # 例如：
+        # 来源：
+        #       add_camera_frame()
         #
-        #   deque([
-        #       frame@80,
-        #       frame@90,
-        #       frame@105,
-        #   ])
         #
-       #
-        # state_timestamp_ns：
+        # 输入 state_timestamp_ns：
         #
-        #   ← pending state["_capture_time_ns"]
+        #       state["_capture_time_ns"]
         #
-       #
-        # 【选择原则】
+        # 来源：
+        #       add_state() → pending_states → merge_ready()
         #
-        # 优先选择：
         #
-        #   timestamp <= state timestamp
+        # 输出：
         #
-       # 中时间最晚的一帧。
+        #       tuple[CameraFrame, bool]
         #
-       # 也就是：
+        # 第一个值：
+        #       被选中的 CameraFrame。
         #
-        #   latest frame not after state
-        #
-       #
-        # 这比简单“绝对时间最近”更偏向因果匹配：
-       # 正常情况下尽量不使用 state 之后才采到的未来帧。
+        # 第二个值：
+        #       是否使用了 fallback。
         # ====================================================================
 
         # ====================================================================
-        # 局部功能块：从最新 frame 向过去反向查找
+        # 局部功能块：从最新帧向过去搜索 causal frame
+        #
+        # queue 本身按照时间从旧到新：
+        #
+        #       [t0, t1, t2, t3]
         #
         # reversed(queue)：
         #
-        #   newest → oldest
+        #       t3 → t2 → t1 → t0
         #
-       #
-        # 第一帧满足：
+        # 因此遇到第一个：
         #
-        #   frame.timestamp_ns <= state_timestamp_ns
+        #       frame.timestamp_ns <= state_timestamp_ns
         #
-       # 就一定是：
+        # 就一定是：
         #
-        #   所有“不晚于 state”的 frame 中最新的一帧。
+        #       state 之前距离它最近的一张 camera frame。
         #
-       #
+        #
         # 例如：
         #
-        #   camera：
+        #       camera: 33, 66, 99
+        #       state : 80
         #
-        #       80, 90, 105
+        # 搜索：
         #
-       #   state：
+        #       99 > 80      ×
+        #       66 <= 80     ✓
         #
-        #       100
+        # 返回 66。
         #
-       # 反向：
         #
-        #       105 → 不满足
-       #        90 → 满足
-        #
-       # 所以选择：
-        #
-        #       90
-        #
-       #
-        # 返回：
-        #
-        #   (frame, False)
-        #
-       # False 表示：
-        #
+        # False：
+        #   表示这是正常 causal match，
         #   没有使用 fallback。
-        #
-       #
-        # 去向：
-        #
-        #   merge_ready()
-        #
-       # 将 frame 放入：
-        #
-        #   selected_frames[camera_name]
         # ====================================================================
         for frame in reversed(queue):
             if frame.timestamp_ns <= state_timestamp_ns:
                 return frame, False
 
         # ====================================================================
-        # 局部功能块：没有任何 frame 早于或等于 state
+        # 局部功能块：没有任何历史帧时使用最早可用帧作为 fallback
         #
-        # 到这里意味着：
+        # 能执行到这里表示：
         #
-        #   queue 中所有 frame：
+        #       queue 中所有 frame.timestamp_ns
+        #           >
+        #       state_timestamp_ns
         #
-        #       timestamp > state_timestamp
-        #
-       #
         # 例如：
         #
-        #   camera：
-       #
-        #       105, 120
+        #       state = 50
         #
-       #   state：
+        #       camera queue:
+        #           66
+        #           99
         #
-        #       100
+        # 没有 state 发生之前的 camera frame。
         #
-       #
-        # 没有“过去帧”可用。
+        # 此时选择：
         #
-       # 当前策略：
+        #       queue[0]
         #
-        #   queue[0]
+        # 即当前能够获得的最早一帧。
         #
-       # 选择现有数据中最早的一帧：
+        # True：
         #
-        #   105
+        #   告诉 merge_ready()：
         #
-       #
-        # 同时返回：
+        #       这次不是正常的 historical/causal match。
         #
-        #   True
+        # merge_ready() 会：
         #
-       # 表示使用了 fallback。
+        #       fallback_matches[camera_name] += 1
         #
-       #
-        # merge_ready() 收到：
-        #
-        #   used_fallback = True
-        #
-       # 后：
-        #
-        #   self.fallback_matches[camera_name] += 1
-        #
-       # 最终可以通过 alignment_summary()
-       # 看到这种非理想匹配发生了多少次。
+        # 便于之后诊断这种异常/边界情况出现了多少次。
         # ====================================================================
         return queue[0], True
 
@@ -1611,87 +1256,66 @@ class LiveEpisodeSynchronizer:
         # ====================================================================
         # _prune_before_selected()
         #
-       # 作用：
+        # 作用：
         #
-       # 当一个 camera frame 已经被选来匹配当前 state 后，
-       # 清理它之前那些以后再也不可能需要的旧 frame。
+        #   一条 state 已经完成匹配后，
+        #   删除“比本次 selected frame 更旧”的 camera frame。
         #
-       #
-        # 调用来源：
         #
-        #   merge_ready()
+        # 输入 queue：
         #
-       # 当前 state 成功写入 episode_data 后：
+        #       self.frames[camera_name]
         #
-        #   for camera_name, selected in selected_frames.items():
+        # 输入 selected：
         #
-       #       _prune_before_selected(...)
+        #       本轮 _select_frame() 选择的 CameraFrame。
         #
-       #
-        # 输入：
         #
-        #   queue
-        #       ← self.frames[camera_name]
+        # 例如：
         #
-       #   selected
-        #       ← _select_frame() 选出的 CameraFrame
-        # ====================================================================
-
-        # ====================================================================
-        # 举例：
+        # 原来：
         #
-        # queue：
+        #       [33, 66, 99, 132]
         #
-        #   [frame80, frame90, frame105, frame120]
+        # 本次 selected：
         #
-       # 当前 state 选择：
+        #       66
         #
-        #   selected = frame90
+        # 处理后：
         #
-       #
-        # 那么：
+        #       [66, 99, 132]
         #
-        #   frame80
         #
-       # 对后面的 state 已经没有保留价值，
-       # 因为：
-        #
-       #   frame90 比它更新，
-       #   并且已经不晚于当前处理进度。
-        #
-       #
-        # 所以删除：
-        #
-        #   frame80
-        #
-       # 变成：
-        #
-        #   [frame90, frame105, frame120]
-        #
-       #
         # 注意：
         #
-        #   selected 本身不会删除。
+        #       selected 自己不会删除。
         #
-       # 这很重要，因为：
+        # 这是刻意的。
         #
-       #   frame90
+        # 因为下一条 robot state 可能仍然需要复用这张图片。
         #
-       # 可能仍然是下一条 state 最合适的 camera frame，
-       # 因此允许一个 CameraFrame 被相邻的多个 state 重用。
+        # 例如：
         #
-       #
-        # 条件：
+        #       camera = 66ms
         #
-       #   len(queue) > 1
+        #       state1 = 70ms
+        #       state2 = 75ms
         #
-       # 防止把 queue 清空。
+        # 两条 state 都可能匹配 66ms。
         #
-       #
-        # queue[0] is not selected：
         #
-       # 只删除 selected 之前的元素；
-       # 当 selected 移到 queue 第一位时停止。
+        # 输出：
+        #
+        #       原地修改 queue
+        #
+        # 没有返回值。
+        #
+        # 修改后的 queue 会继续被后面的：
+        #
+        #       can_match()
+        #       _select_frame()
+        #
+        # 使用。
         # ====================================================================
         while len(queue) > 1 and queue[0] is not selected:
             queue.popleft()
@@ -1700,449 +1324,318 @@ class LiveEpisodeSynchronizer:
         # ====================================================================
         # merge_ready()
         #
-       # 这是 LiveEpisodeSynchronizer 最核心的函数。
+        # 这是整个 synchronizer 的核心调度函数。
         #
-       #
-        # 【调用来源】
         #
-        # episode_worker 主循环中：
+        # 正常调用来源：
         #
-        #   synchronizer.merge_ready(force=False)
+        #       episode_worker.py 主循环
         #
-       # 正常录制阶段不断调用。
+        #       synchronizer.merge_ready(force=False)
         #
-       #
-        # STOP_SAVE 后，如果最后几个 state 一直无法等到理想 camera frame，
-       # 到 tail_wait_timeout_s 后：
         #
-        #   synchronizer.merge_ready(force=True)
+        # episode 结束时，如果最后几条 state 等不到新的 camera watermark：
         #
-       #
-        # 【输入数据来源】
+        #       synchronizer.merge_ready(force=True)
         #
-       # robot state：
+        #
+        # 输入：
         #
         #   self.pending_states
         #       ← add_state()
-        #       ← episode_worker ZMQ state_socket
-        #       ← x86 teleoperation
-        #
-       #
-        # camera：
         #
         #   self.frames
         #       ← add_camera_frame()
-        #       ← decode_ros_image()
-        #       ← ROS Image topics
         #
-       #
-        # 【输出】
         #
-        # 每成功匹配一个 state：
-        #
-        #   entry
-        #
-       # 进入：
+        # 输出：
         #
         #   self.episode_data
+        #       新增完成对齐的数据 entry
         #
-       #
-        # 最终：
-        #
-        #   episode_worker
-        #       ↓
-        #   write_episode_pickle()
-        #
-       #
-        # 返回值：
-        #
-        #   merged
-        #
-       # 表示本次调用成功融合了多少条 state。
+        #   return merged
+        #       本次函数一共完成了多少条 state 的合并。
         # ====================================================================
 
         # ====================================================================
-        # 局部功能块：初始化本次调用的成功融合计数
+        # 局部功能块：初始化本次调用的 merge 数量
         #
         # merged 只统计：
         #
-        #   当前这一次 merge_ready() 调用
+        #       “这一次 merge_ready() 调用”
         #
-       # 处理了多少条 state。
+        # 合并了多少条。
         #
-       # 它不同于：
+        # 它不会跨调用累计。
         #
-        #   len(self.episode_data)
-        #
-       # 后者是整个 episode 累积完成的数据量。
+        # 最后 return 给 episode_worker。
         # ====================================================================
         merged = 0
 
         # ====================================================================
-        # 只要还有等待处理的 state，
-       # 就尝试从最早一条开始连续处理。
+        # 局部功能块：按时间顺序持续处理最老的 pending state
         #
-       # 为什么必须从最早的 state 开始：
+        # 只要 pending_states 非空就尝试继续。
         #
-       # camera 和 state 都是时间序列，
-       # 保证前面的 state 先完成，
-       # 可以维持 episode_data 的时间顺序。
+        # 为什么总是处理队头：
+        #
+        #       pending_states
+        #
+        # 在 add_state() 中按时间加入，
+        # 所以：
+        #
+        #       pending_states[0]
+        #
+        # 是当前最早尚未完成 camera 对齐的 robot state。
+        #
+        # 必须先处理它，
+        # 才能安全裁剪旧 camera frame。
         # ====================================================================
         while self.pending_states:
 
             # ================================================================
-            # 局部功能块：取最早一个待匹配 state
+            # 局部功能块：取得当前最早的 state 及其时间
             #
-            # self.pending_states：
+            # state：
             #   ← add_state()
+            #   ← x86 robot state
             #
-           # [0]：
+            # state_timestamp_ns：
+            #   ← state["_capture_time_ns"]
             #
-            #   只读取，不立即删除。
             #
-           # 因为此时还不知道 camera 数据是否已经足够。
+            # 后续 state_timestamp_ns 会传给：
             #
-           #
-            # state 只有真正成功融合后，
-           # 才会在后面：
+            #       can_match()
+            #       _select_frame()
             #
-            #   popleft()
-            #
-           # 删除。
+            # 作为 camera-state 对齐的时间基准。
             # ================================================================
             state = self.pending_states[0]
-
-            # ================================================================
-            # 局部功能块：提取当前 state 的同步基准 timestamp
-            #
-            # 来源：
-            #
-            #   state["_capture_time_ns"]
-            #
-           # 这个字段最初随 x86 state 一起发过来，
-           # add_state() 已经检查过其时间顺序。
-            #
-           #
-            # 后续用于：
-            #
-            #   can_match()
-            #   _select_frame()
-            #   时间误差统计
-            # ================================================================
             state_timestamp_ns = int(state["_capture_time_ns"])
 
             # ================================================================
-            # 局部功能块：所有 camera 至少要有一帧
+            # 局部功能块：没有三路 camera 首帧时暂停合并
             #
-            # cameras_ready()：
+            # cameras_ready() 检查：
             #
-           # 检查：
+            #       每一路 camera queue 都非空。
             #
-            #   head
-            #   left_wrist
-            #   right_wrist
+            # 如果有任何一路没有图片：
             #
-           # 等所有 camera queue 非空。
+            #       break
             #
-           #
-            # 如果有一路还完全没有图像：
-            #
-            #   break
-            #
-           #
-            # 为什么不是 continue：
-            #
-           # 因为当前最早的 state 都无法处理，
-           # 后面的 state 更不应该越过它先处理。
-            #
-           #
-            # 当前 state：
-            #
-            #   保留在 pending_states
-            #
-           # 等下一次更多 camera frame 到来后，
-           # 再调用 merge_ready()。
+            # state 仍然留在 pending_states，
+            # 等 episode_worker 收到更多 camera frame 后
+            # 下次再调用 merge_ready()。
             # ================================================================
             if not self.cameras_ready():
                 break
 
             # ================================================================
-            # 局部功能块：正常模式下等待所有 camera 时间线走过 state
+            # 局部功能块：正常模式下等待 camera watermark 越过 state
             #
             # force=False：
             #
-           # 正常录制模式。
+            #   正常实时录制模式。
             #
-           # 此时：
+            #   必须满足 can_match(state_timestamp_ns)。
             #
-            #   can_match(state_timestamp_ns)
+            #   否则说明至少一路 camera 的最新时间
+            #   还没有越过当前 state，
+            #   暂时不能确定“state 前最近一帧”是哪一张。
             #
-           # 必须为 True。
             #
-           #
-            # 也就是每一路 camera 的最新 frame：
-            #
-            #   latest.timestamp >= state timestamp
-            #
-           #
-            # 如果还没满足：
-            #
-            #   break
-            #
-           # 等未来 camera frame 到来。
-            #
-           #
             # force=True：
             #
-           # 这个检查被跳过。
+            #   episode 收尾时使用。
             #
-           # 主要用于 STOP_SAVE 的尾部收尾阶段：
+            #   不再等待每一路最新 camera timestamp 越过 state，
+            #   直接使用现有 queue 尽可能完成剩余匹配。
             #
-            #   已经等了一段时间，
-           #   不再无限等待更合适的 future camera frame，
-           #   而是用当前已有数据尽量完成最后的 state。
+            #   但上面的 cameras_ready() 仍然必须成立，
+            #   所以 force 并不是“没有图也强行生成”。
             # ================================================================
             if not force and not self.can_match(state_timestamp_ns):
                 break
 
             # ================================================================
-            # 局部功能块：创建当前 state 的多相机选择结果
+            # 局部功能块：为当前 state 创建“各 camera 选中帧”容器
             #
-            # selected_frames：
+            # 最终结构：
             #
-           # key：
-            #   camera_name
+            #       selected_frames = {
+            #           "head": CameraFrame(...),
+            #           "left_wrist": CameraFrame(...),
+            #           "right_wrist": CameraFrame(...),
+            #       }
             #
-           # value：
-            #   当前 state 对应选中的 CameraFrame
             #
-           #
-            # 初始：
+            # 后续：
             #
-            #   {}
+            #   ① 用于创建 entry["image"]
             #
-           #
-            # 循环完成后类似：
+            #   ② 用于 _prune_before_selected()
             #
-            #   {
-            #       "head": CameraFrame(...),
-            #       "left_wrist": CameraFrame(...),
-            #       "right_wrist": CameraFrame(...),
-            #   }
-            #
-           #
-            # 后续用于：
-            #
-            #   1. 构造 entry["image"]
-            #   2. 清理旧 frame queue
             # ================================================================
             selected_frames: Dict[str, CameraFrame] = {}
 
             # ================================================================
-            # 对每一路 camera 独立选择与当前 state 对应的 frame。
+            # 局部功能块：分别给每一路 camera 选择与当前 state 对齐的帧
+            #
+            # camera_name 来源：
+            #
+            #       self.camera_names
+            #
+            # 对每一路：
+            #
+            #       self.frames[camera_name]
+            #               ↓
+            #       _select_frame(...)
+            #
+            # 得到：
+            #
+            #       selected
+            #       used_fallback
             # ================================================================
             for camera_name in self.camera_names:
-
-                # ============================================================
-                # 局部功能块：为当前 camera 选择对应帧
-                #
-                # 输入：
-                #
-                #   self.frames[camera_name]
-                #       ← add_camera_frame()
-                #
-               #   state_timestamp_ns
-                #       ← 当前 pending state
-                #
-               #
-                # _select_frame() 正常原则：
-                #
-                #   找 timestamp <= state timestamp
-               #   中最新的一帧。
-                #
-               #
-                # 返回：
-                #
-                #   selected
-                #       选中的 CameraFrame
-                #
-               #   used_fallback
-                #       是否因为不存在过去帧而使用 queue[0]
-                #
-               #
-                # 数据去向：
-                #
-                #   selected
-                #       ↓
-                #   selected_frames
-                #
-               #   used_fallback
-                #       ↓
-                #   fallback 统计
-                # ============================================================
                 selected, used_fallback = self._select_frame(
                     self.frames[camera_name],
                     state_timestamp_ns,
                 )
 
                 # ============================================================
-                # 把该 camera 的选择结果保存下来。
+                # 局部功能块：保存本路 camera 的匹配结果
                 #
-                # 后续构造：
+                # selected：
+                #   ← _select_frame()
                 #
-                #   entry["image"]
+                # 输出到：
                 #
-               # 时需要一次性使用三路 selected frame。
+                #       selected_frames[camera_name]
+                #
+                # 后续用于：
+                #
+                #       selected_frames[camera_name].image.copy()
+                #
+                # 构建最终训练 entry。
                 # ============================================================
                 selected_frames[camera_name] = selected
 
                 # ============================================================
-                # 局部功能块：统计 fallback
+                # 局部功能块：记录 fallback 匹配
                 #
                 # used_fallback：
-                #   ← _select_frame()
                 #
-               # 如果 True：
+                #   False
+                #       找到了 timestamp <= state 的历史帧。
                 #
-                #   当前 camera 没有 timestamp <= state 的帧，
-               #   使用了 queue 中最早的一帧。
+                #   True
+                #       没有历史帧，只能使用 queue[0]。
                 #
-               #
-                # 计数去向：
+                # fallback_matches 后续进入：
                 #
-                #   alignment_summary()
+                #       alignment_summary()
+                #
+                # 用于评估同步数据质量。
                 # ============================================================
                 if used_fallback:
                     self.fallback_matches[camera_name] += 1
 
                 # ============================================================
-                # 局部功能块：计算 state 与选中 camera frame 的时间偏差
+                # 局部功能块：计算当前 camera-state 时间差
                 #
                 # state_timestamp_ns：
-                #   robot state 采集时间。
+                #   ← robot state["_capture_time_ns"]
                 #
-               # selected.timestamp_ns：
-                #   camera frame 时间。
+                # selected.timestamp_ns：
+                #   ← CameraFrame
+                #   ← ROS Image.header.stamp
                 #
-               #
+                #
                 # delta_ns：
                 #
-                #   state_timestamp - camera_timestamp
+                #       state time - camera time
                 #
-               #
-                # 如果正常选择过去帧：
+                # 正常 causal frame 一般：
                 #
-                #   delta_ns >= 0
+                #       delta_ns >= 0
                 #
-               # 如果使用了 state 之后的 fallback frame：
+                # fallback 使用 state 之后的图片时可能：
                 #
-                #   delta_ns < 0
+                #       delta_ns < 0
                 #
-               #
-                # abs_delta_ns：
                 #
-                #   只关心两者相差多少时间，
-               #   不关心 frame 在 state 前还是后。
+                # 统计指标只关心偏差大小，
+                # 所以再计算：
                 #
-               #
-                # 后续用于三项统计：
-                #
-                #   alignment_count
-                #   alignment_abs_sum_ns
-                #   alignment_abs_max_ns
+                #       abs_delta_ns = abs(delta_ns)
                 # ============================================================
                 delta_ns = state_timestamp_ns - selected.timestamp_ns
                 abs_delta_ns = abs(delta_ns)
 
                 # ============================================================
-                # 当前 camera 又完成一次 state-frame 对齐。
+                # 局部功能块：累计 alignment 统计
                 #
-                # 去向：
-                #   alignment_summary()["count"]
+                # alignment_count：
+                #   匹配次数 +1
+                #
+                # alignment_abs_sum_ns：
+                #   累加绝对误差，
+                #   后续用于计算平均值。
+                #
+                # alignment_abs_max_ns：
+                #   保存目前最大的单次时间误差。
+                #
+                #
+                # 后续统一由：
+                #
+                #       alignment_summary()
+                #
+                # 转换成 ms。
                 # ============================================================
                 self.alignment_count[camera_name] += 1
-
-                # ============================================================
-                # 累积绝对时间误差。
-                #
-                # 最终：
-                #
-                #   sum / count
-                #
-               # 得到 mean_abs_delta_ms。
-                # ============================================================
                 self.alignment_abs_sum_ns[camera_name] += abs_delta_ns
-
-                # ============================================================
-                # 更新当前 camera 目前见过的最大同步误差。
-                #
-                # 最终：
-                #
-                #   alignment_summary()
-                #       ↓
-                #   max_abs_delta_ms
-                # ============================================================
                 self.alignment_abs_max_ns[camera_name] = max(
                     self.alignment_abs_max_ns[camera_name],
                     abs_delta_ns,
                 )
 
             # ================================================================
-            # 局部功能块：从原始 state 构造最终 episode sample 的基础部分
+            # 局部功能块：从 robot state 构建最终数据 entry
             #
-            # state：
+            # 输入：
             #
-            #   ← pending_states
+            #       state
             #
-           # 原始结构可能包含：
+            # 来源：
             #
-            #   _episode_id
-            #   _frame_index
-            #   _capture_time_ns
+            #       x86 teleoperation process
+            #           ↓
+            #       episode_worker
+            #           ↓
+            #       add_state()
+            #           ↓
+            #       pending_states
             #
-           # 以及真正机器人训练所需：
             #
-            #   state
-            #   action
-            #   gripper
-            #   ...
+            # 当前处理：
             #
-           #
-            # 当前 dict comprehension：
+            # 删除 Recorder 内部同步字段：
             #
-            #   对 state 的所有 key/value 做复制，
-           #   但是：
+            #       _episode_id
+            #       _frame_index
+            #       _capture_time_ns
             #
-            #       if key not in INTERNAL_STATE_KEYS
+            # 其他 robot observation/action 字段保持原值。
             #
-           # 会过滤 Recorder 内部元数据。
             #
-           #
-            # 例如：
+            # 输出：
             #
-            # 原始：
+            #       entry
             #
-            #   {
-            #       "_episode_id": "123",
-            #       "_frame_index": 10,
-            #       "_capture_time_ns": ...,
-            #       "state": ...,
-            #       "action": ...,
-            #   }
-            #
-           # 得到：
-            #
-            #   entry = {
-            #       "state": ...,
-            #       "action": ...,
-            #   }
-            #
-           #
-            # entry 后续还会加入：
-            #
-            #   entry["image"]
-            #
-           # 然后进入 episode_data。
+            # 此时 entry 还没有 image，
+            # 下一功能块再添加。
             # ================================================================
             entry = {
                 key: value
@@ -2151,58 +1644,44 @@ class LiveEpisodeSynchronizer:
             }
 
             # ================================================================
-            # 局部功能块：把刚才选好的三路 camera image 加到当前 entry
+            # 局部功能块：把三路已经对齐的 image 添加到 robot entry
             #
-            # selected_frames：
+            # selected_frames 来源：
             #
-            #   ← 上一个 camera loop
+            #       _select_frame()
             #
-           # 每个 CameraFrame 包含：
             #
-            #   timestamp_ns
-            #   image
-            #   encoding
+            # selected_frames[camera_name].image：
             #
-           #
-            # 当前最终只取：
+            #       CameraFrame.image
+            #           ← image_decoder.py
+            #           ← ROS sensor_msgs/Image.data
             #
-            #   selected_frames[camera_name].image
             #
-           #
-            # 输出结构：
+            # 最终生成：
             #
-            #   entry["image"] = {
+            #       entry["image"] = {
+            #           "head": {
+            #               "color": <np.ndarray>
+            #           },
+            #           "left_wrist": {
+            #               "color": <np.ndarray>
+            #           },
+            #           "right_wrist": {
+            #               "color": <np.ndarray>
+            #           },
+            #       }
             #
-            #       "head": {
-            #           "color": np.ndarray
-            #       },
             #
-            #       "left_wrist": {
-            #           "color": np.ndarray
-            #       },
+            # 为什么 .copy()：
             #
-            #       "right_wrist": {
-            #           "color": np.ndarray
-            #       },
-            #   }
+            #   给最终 episode entry 保存独立的 ndarray 数据，
+            #   避免它继续依赖 CameraFrame 中原来的数组对象。
             #
-           #
-            # image.copy()：
             #
-           # 不是直接把 CameraFrame 中的 ndarray 引用放进去，
-           # 而是复制一份图像数据。
+            # 输出 entry 后续：
             #
-           # 这样 episode_data 中保存的图像数据
-           # 不依赖之后 frame queue 内对象的生命周期。
-            #
-           #
-            # 最终去向：
-            #
-            #   entry
-            #       ↓
-            #   self.episode_data
-            #       ↓
-            #   write_episode_pickle()
+            #       self.episode_data.append(entry)
             # ================================================================
             entry["image"] = {
                 camera_name: {
@@ -2212,123 +1691,112 @@ class LiveEpisodeSynchronizer:
             }
 
             # ================================================================
-            # 局部功能块：将已经完成 state + camera 对齐的数据
-            #             正式加入 episode_data
+            # 局部功能块：提交一条完整的同步数据
             #
-            # entry：
+            # entry 此时已经同时包含：
             #
-           # 已经包含：
-            #
-            #   robot state/action
+            #       robot state/action
             #       +
-            #   三路 camera images
+            #       对齐后的三路 camera image
             #
-           #
-            # self.episode_data：
-            #   ← __init__() 初始化。
+            # append 后进入：
             #
-           #
-            # append 后：
+            #       self.episode_data
             #
-           # 当前 state 就正式成为最终 episode 的一帧数据。
             #
-           #
-            # 最终：
+            # episode 完成后：
             #
-            #   episode_worker.py
-            #
-           # 会将整个：
-            #
-            #   synchronizer.episode_data
-            #
-           # 传给 write_episode_pickle()。
+            #       episode_worker.py
+            #           ↓
+            #       synchronizer.episode_data
+            #           ↓
+            #       dataset_writer.write_episode_pickle()
+            #           ↓
+            #       <episode_id>.pkl
             # ================================================================
             self.episode_data.append(entry)
 
             # ================================================================
-            # 局部功能块：从 pending queue 删除已经处理成功的 state
+            # 局部功能块：从 pending queue 删除已经处理完成的 state
             #
-            # 当前处理的是：
+            # 当前 state：
             #
-            #   pending_states[0]
+            #       self.pending_states[0]
             #
-           # 现在已经：
+            # 已经生成对应 entry，
+            # 因此不再需要等待 camera。
             #
-            #   选择 camera
-            #   构造 entry
-            #   append 到 episode_data
+            # popleft 后下一轮 while：
             #
-           # 因此可以：
+            #       self.pending_states[0]
             #
-            #   popleft()
-            #
-           # 让下一轮 while 处理下一条 state。
+            # 就变成下一条 robot state。
             # ================================================================
             self.pending_states.popleft()
 
             # ================================================================
-            # 当前 merge_ready() 调用的成功处理数量 +1。
+            # 局部功能块：增加本次 merge_ready 的完成计数
             #
-            # 最终 return merged。
+            # 最后：
+            #
+            #       return merged
+            #
+            # 告诉调用者这一次实际消费了多少条 pending state。
             # ================================================================
             merged += 1
 
             # ================================================================
-            # 局部功能块：清理每一路 camera 中已经过时的旧 frame
+            # 局部功能块：清理已经不可能再次使用的旧 camera frame
             #
             # selected_frames：
-            #   ← 当前 state 的选择结果。
             #
-           # 对每个 camera：
+            #       当前 state 实际选中的 frame。
             #
-            #   _prune_before_selected()
+            # 对每一路 camera 调用：
             #
-           # 删除 selected 之前的 frame。
+            #       _prune_before_selected()
             #
-           #
+            # 删除 selected 之前更老的帧。
+            #
+            #
             # 例如：
             #
-            #   [80, 90, 105]
+            #       [33, 66, 99]
             #
-           # 当前 selected：
+            # selected = 66
             #
-            #   90
+            # 变成：
             #
-           # 处理后：
+            #       [66, 99]
             #
-            #   [90, 105]
             #
-           #
-            # selected 本身保留，
-           # 因为它可能仍然适合匹配下一条 robot state。
+            # selected 自身保留下来，
+            # 因为下一条 state 仍可能使用它。
             #
-           #
-            # 这个步骤的主要作用：
+            # 清理后的 self.frames 会直接传给下一轮：
             #
-            #   1. 控制相机缓存大小
-            #   2. 去掉未来不再可能被选择的旧数据
-            #   3. 保留可能被下一 state 重用的 selected frame
+            #       can_match()
+            #       _select_frame()
+            #
+            # 同时避免 camera queue 随 episode 持续无限增长。
             # ================================================================
             for camera_name, selected in selected_frames.items():
-                self._prune_before_selected(self.frames[camera_name], selected)
+                self._prune_before_selected(
+                    self.frames[camera_name],
+                    selected,
+                )
 
         # ====================================================================
-        # 返回：
+        # 局部功能块：返回本轮完成的 state 数量
         #
-        #   本次 merge_ready() 一共成功融合的 state 数量。
+        # merged：
         #
-       #
-        # 注意：
+        #       当前这一次 merge_ready() 调用
+        #       成功生成了多少条 episode_data entry。
         #
-        # episode_worker 当前主要依赖 merge_ready() 对
-        # self.episode_data / pending_states 的副作用，
-       # 并没有使用这个返回值进行核心控制。
-        #
-       # 但返回 merged 可以方便：
-       #
-        #   调试
-        #   测试
-        #   统计一次调用做了多少实际工作
+        # 正常实时循环里 episode_worker 并不依赖这个数值做保存，
+        # 但它可以用于调用者判断本次是否发生了实际合并，
+        # 测试代码也会使用这个返回值验证同步行为。
         # ====================================================================
         return merged
 
@@ -2336,209 +1804,172 @@ class LiveEpisodeSynchronizer:
         # ====================================================================
         # alignment_summary()
         #
-       # 作用：
+        # 作用：
         #
-        #   把整个 episode 中累计的 camera-state 对齐统计
-       #   整理成一个容易输出/记录的 dict。
+        #       把整个 episode 累积的 camera-state 对齐统计
+        #       整理成容易读取的毫秒级 summary。
         #
-       #
+        #
         # 调用来源：
         #
-        #   episode_worker.py
+        #       episode_worker.py
         #
-       # 保存成功后 worker 会发送：
+        # episode 保存完成以后发送：
         #
-        #   {
-        #       "type": "saved",
-        #       ...
-        #       "alignment":
-        #           synchronizer.alignment_summary(),
-        #   }
+        #       {
+        #           "type": "saved",
+        #           ...
+        #           "alignment": synchronizer.alignment_summary(),
+        #       }
         #
-       #
-        # 然后：
         #
-        #   episode_worker
-        #       ↓ Pipe
-        #   RecorderServer._poll_workers()
-        #       ↓
-       #   handle.last_message / recent
+        # 因此这个结果主要是：
         #
-       # 所以这些数据主要用于：
+        #       “录制质量诊断信息”
         #
-        #   观察一次 episode 的相机同步质量，
-       #   而不是作为训练数据本身保存进 episode_data。
+        # 而不是 episode_data 本身。
         # ====================================================================
 
         # ====================================================================
-        # 局部功能块：初始化最终统计结果
+        # 局部功能块：创建最终统计字典
         #
-        # summary 最终结构：
+        # 最终结构：
         #
-        #   {
-        #       "head": {...},
-        #       "left_wrist": {...},
-        #       "right_wrist": {...},
-        #   }
+        #       {
+        #           "head": {...},
+        #           "left_wrist": {...},
+        #           "right_wrist": {...},
+        #       }
         # ====================================================================
         summary = {}
 
         # ====================================================================
-        # 每一路 camera 单独整理统计。
+        # 局部功能块：逐 camera 汇总统计
+        #
+        # name：
+        #
+        #       ← self.camera_names
+        #
+        # 对每一路独立计算，
+        # 因为不同 camera 的延迟和丢帧情况可能完全不同。
         # ====================================================================
         for name in self.camera_names:
 
             # ================================================================
-            # count 来源：
+            # 局部功能块：取得该 camera 的有效匹配次数
             #
-            #   merge_ready()
+            # 来源：
             #
-           # 每成功把一个 state 和这个 camera 对齐一次：
+            #       merge_ready()
             #
-            #   alignment_count[name] += 1
+            # 每匹配一条 state：
             #
-           #
-            # count 后续用于：
+            #       alignment_count[name] += 1
             #
-            #   mean absolute delta
+            #
+            # count 后续既用于：
+            #
+            #   ① summary["count"]
+            #
+            #   ② 计算平均绝对时间误差
             # ================================================================
             count = self.alignment_count[name]
 
             # ================================================================
-            # 局部功能块：计算平均绝对时间偏差
+            # 局部功能块：计算平均绝对对齐误差
             #
             # alignment_abs_sum_ns：
             #
-           #   merge_ready() 中累计所有：
+            #   merge_ready() 累积的：
             #
-            #       abs(
-            #           state_timestamp
-            #           -
-            #           frame_timestamp
-            #       )
+            #       Σ |state_timestamp - camera_timestamp|
             #
-           #
-            # / count：
+            # 除以 count：
             #
-           #   得到平均 ns。
+            #       平均误差，单位 ns
             #
-           # / 1_000_000：
+            # 再除：
             #
-            #   ns → ms
+            #       1_000_000
             #
-           # 因为：
+            # 转换：
             #
-            #   1 ms = 1,000,000 ns
+            #       ns → ms
             #
-           #
+            #
             # 如果 count == 0：
             #
-            #   返回 0.0
+            #       average_ms = 0.0
             #
-           # 避免除零。
+            # 避免除零。
             # ================================================================
             average_ms = (
-                self.alignment_abs_sum_ns[name] / count / 1_000_000.0
+                self.alignment_abs_sum_ns[name]
+                / count
+                / 1_000_000.0
                 if count
                 else 0.0
             )
 
             # ================================================================
-            # 局部功能块：整理当前 camera 的最终统计
+            # 局部功能块：构建单路 camera 的 summary
             #
-           #
-            # count
+            # count：
+            #   完成多少次 camera-state match。
             #
-            #   来源：
-            #       alignment_count
+            # mean_abs_delta_ms：
+            #   平均绝对时间差。
             #
-            #   表示：
-            #       一共完成多少次 state-camera 匹配。
+            # max_abs_delta_ms：
+            #   整个 episode 最大绝对时间差。
             #
-           #
-            # mean_abs_delta_ms
+            # fallback_matches：
+            #   没有 timestamp <= state 的历史帧，
+            #   因而使用最早可用帧的次数。
             #
-            #   来源：
-            #       alignment_abs_sum_ns / count
+            # dropped_out_of_order_images：
+            #   add_camera_frame() 因时间戳倒退而丢弃的帧数。
             #
-            #   表示：
-            #       平均时间同步误差。
             #
-           #
-            # max_abs_delta_ms
+            # 输出：
             #
-            #   来源：
-            #       alignment_abs_max_ns
+            #       summary[name]
             #
-            #   表示：
-            #       本 episode 最差的一次同步误差。
-            #
-           #
-            # fallback_matches
-            #
-            #   来源：
-            #       _select_frame()
-            #
-            #   表示：
-            #       有多少次找不到 timestamp <= state timestamp 的 frame，
-           #       被迫使用 queue 中最早的 frame。
-            #
-           #
-            # dropped_out_of_order_images
-            #
-            #   来源：
-            #       add_camera_frame()
-            #
-            #   表示：
-            #       有多少相机帧因为 timestamp 比前一帧更早
-           #       而被直接丢弃。
-            #
-           #
-            # 当前 camera 的结果：
-            #
-           #   ↓
-            #
-            # summary[name]
-            #
-           # 所有 camera 循环完成后，
-           # summary 返回 episode_worker。
+            # 最终整个 summary 返回 episode_worker。
             # ================================================================
             summary[name] = {
                 "count": count,
                 "mean_abs_delta_ms": average_ms,
-                "max_abs_delta_ms": self.alignment_abs_max_ns[name]
-                / 1_000_000.0,
+                "max_abs_delta_ms": (
+                    self.alignment_abs_max_ns[name]
+                    / 1_000_000.0
+                ),
                 "fallback_matches": self.fallback_matches[name],
-                "dropped_out_of_order_images": self.dropped_out_of_order_images[
-                    name
-                ],
+                "dropped_out_of_order_images": (
+                    self.dropped_out_of_order_images[name]
+                ),
             }
 
         # ====================================================================
-        # summary 去向：
+        # 局部功能块：返回整个 episode 的 alignment 质量信息
         #
-        #   alignment_summary()
-        #       ↓
-        #   episode_worker.py
+        # 去向：
         #
-       # worker 保存成功后：
+        #       episode_worker.py
+        #           ↓
+        #       control_connection.send({
+        #           "type": "saved",
+        #           ...
+        #           "alignment": summary,
+        #       })
+        #           ↓
+        #       RecorderServer
         #
-        #   control_connection.send({
-        #       "type": "saved",
-        #       ...
-        #       "alignment": summary,
-        #   })
+        # 因此可以在 episode 保存之后看到三路相机各自的：
         #
-       #       ↓
-        #   multiprocessing.Pipe
-        #       ↓
-       #   RecorderServer._poll_workers()
-        #       ↓
-       #   recent / STATUS details / log
-        #
-       #
-        # 所以这个 summary 主要用于：
-        #
-       #   对录制数据的时间同步质量进行诊断。
+        #       平均时间误差
+        #       最大时间误差
+        #       fallback 次数
+        #       乱序丢帧次数
         # ====================================================================
         return summary
