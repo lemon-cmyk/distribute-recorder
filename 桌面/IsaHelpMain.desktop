@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Exec=/opt/asmagent/bin/running
+Icon=/opt/asmagent/icons/logo.png
+StartupNotify=true
+Hidden=false
+Terminal=false
+Name[en_US]=NAC Client
+Name=NAC Client
+Comment[en_US]=NAC Client
+Comment=NAC Client
+Categories=GNOME;Application;Network;

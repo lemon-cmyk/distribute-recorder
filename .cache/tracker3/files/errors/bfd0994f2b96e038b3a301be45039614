@@ -1,0 +1,4 @@
+[Report]
+Uri=file:///home/grg/snap
+Message=ambiguous column name: ROWID
+Sparql=DELETE WHERE {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n  <urn:fileid:/dev/nvme0n1p1:945597> nie:isStoredAs ?nie_isStoredAs } };\nDELETE WHERE {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n  <urn:fileid:/dev/nvme0n1p1:945597> nie:mimeType ?nie_mimeType } };\nDELETE WHERE {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n  <file:///home/grg/snap> nie:interpretedAs ?nie_interpretedAs } };\nINSERT DATA {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n<file:///home/grg/snap> a nfo:FileDataObject ; \n  nie:interpretedAs <urn:fileid:/dev/nvme0n1p1:945597> .\n<urn:fileid:/dev/nvme0n1p1:945597> a nie:InformationElement , nfo:Folder ; \n  nie:isStoredAs <file:///home/grg/snap> ; \n  nie:mimeType "inode/directory" .\n}\n};\n

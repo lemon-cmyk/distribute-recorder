@@ -1,0 +1,4 @@
+cd /home/grg/distribute-recorder
+.venv-lerobot/bin/python scripts/merge_lerobot_v21.py \
+  /home/grg/lerobot_datasets/g200_dataset_1012_* \
+  -o /home/grg/lerobot_datasets/g200_merged

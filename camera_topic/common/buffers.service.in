@@ -1,0 +1,11 @@
+[Unit]
+Description=ROS 2 camera UDP buffer ceilings
+After=systemd-sysctl.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 {runtime}/prepare_buffers.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

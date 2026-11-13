@@ -1,0 +1,21 @@
+[Unit]
+Description={description}
+Wants=network-online.target
+Requires=ros2-camera-buffers.service
+After=network-online.target ros2-camera-buffers.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+WorkingDirectory={runtime}
+ExecStart=/bin/bash {runtime}/{script}
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=25
+
+[Install]
+WantedBy=multi-user.target

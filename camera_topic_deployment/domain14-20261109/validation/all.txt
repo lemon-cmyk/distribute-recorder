@@ -1,0 +1,6 @@
+/camera/color/image_raw
+/camera/depth/image_raw
+/wrist_cameras/left/color/image_raw
+/wrist_cameras/left/depth/image_rect_raw
+/wrist_cameras/right/color/image_raw
+/wrist_cameras/right/depth/image_rect_raw

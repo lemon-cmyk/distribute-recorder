@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import time
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 from .direct_lerobot_dataset import get_direct_lerobot_dataset_class
+from .hil_metadata import HIL_FEATURES, extract_hil_metadata
 
 
 CAMERA_NAMES = ("head", "left_wrist", "right_wrist")
@@ -25,11 +27,7 @@ TARGET_VECTOR_NAMES = (
     *(f"right_arm_{index}.pos" for index in range(1, 8)),
     "right_gripper.pos",
 )
-DEFAULT_VIDEO_BITRATES = {
-    "front": 5_000_000,
-    "left_wrist": 2_000_000,
-    "right_wrist": 3_000_000,
-}
+
 
 
 def _debug(stage: str, message: str) -> None:
@@ -55,31 +53,42 @@ class LeRobotV21Writer:
         task: str,
         fps: int,
         use_videos: bool,
-        image_width: int = 640,
-        image_height: int = 480,
+        image_width: int | None = None,
+        image_height: int | None = None,
         state_key: str = "observation.state",
         action_key: str = "action",
         image_prefix: str = "observation.images",
         camera_color_order: Mapping[str, str] | None = None,
         image_writer_threads: int = 2,
-        direct_video_bitrates: Mapping[str, int] | None = None,
         _dataset_cls=None,
     ) -> None:
         if not task.strip():
             raise ValueError("task must not be empty")
         if not isinstance(fps, int) or isinstance(fps, bool) or fps <= 0:
             raise ValueError("fps must be a positive integer")
-        if image_width <= 0 or image_height <= 0:
+        if (image_width is not None and image_width <= 0) or (
+            image_height is not None and image_height <= 0
+        ):
             raise ValueError("image dimensions must be positive")
 
+        # orders = dict(
+        #     camera_color_order
+        #     or {
+        #         "head": "bgr",
+        #         "left_wrist": "bgr",
+        #         "right_wrist": "bgr",
+        #     }
+        # )
+
         orders = dict(
-            camera_color_order
-            or {
-                "head": "rgb",
-                "left_wrist": "bgr",
-                "right_wrist": "bgr",
-            }
-        )
+                    camera_color_order
+                    or {
+                        "head": "rgb",
+                        "left_wrist": "rgb",
+                        "right_wrist": "rgb",
+                    }
+                )
+        
         if set(orders) != set(CAMERA_NAMES):
             raise ValueError(f"camera_color_order must contain exactly {CAMERA_NAMES}")
         if any(order not in {"rgb", "bgr"} for order in orders.values()):
@@ -89,28 +98,16 @@ class LeRobotV21Writer:
         self.repo_id = repo_id
         self.task = task.strip()
         self.fps = fps
-        self.use_videos = bool(use_videos)
-        self.image_width = int(image_width)
-        self.image_height = int(image_height)
+        if not use_videos:
+            raise ValueError("NumPy direct conversion requires use_videos=true")
+        self.use_videos = True
+        self.image_width = image_width
+        self.image_height = image_height
         self.state_key = self._feature_key(state_key, "state_key")
         self.action_key = self._feature_key(action_key, "action_key")
         self.image_prefix = self._feature_key(image_prefix.rstrip("."), "image_prefix")
         self.camera_color_order = orders
         self.image_writer_threads = int(image_writer_threads)
-        self.direct_video_bitrates = dict(
-            DEFAULT_VIDEO_BITRATES
-            if direct_video_bitrates is None
-            else direct_video_bitrates
-        )
-        if set(self.direct_video_bitrates) != set(OUTPUT_CAMERA_NAMES):
-            raise ValueError(
-                f"direct_video_bitrates must contain exactly {OUTPUT_CAMERA_NAMES}"
-            )
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value <= 0
-            for value in self.direct_video_bitrates.values()
-        ):
-            raise ValueError("direct_video_bitrates values must be positive integers")
         self._dataset_cls = _dataset_cls or self._import_lerobot_dataset()
         self.dataset = None
 
@@ -196,13 +193,42 @@ class LeRobotV21Writer:
             )
         return state, action
 
+    @staticmethod
+    def _decode_jpeg(value: bytes | bytearray | memoryview, field: str) -> np.ndarray:
+        # Pillow is already provided by the isolated LeRobot environment.
+        # JPEG carries color information; decoding to RGB does not depend on
+        # the channel-order setting used for legacy NumPy arrays.
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(value), formats=("JPEG",)) as source:
+                return np.array(source.convert("RGB"), dtype=np.uint8)
+        except (OSError, ValueError, SyntaxError) as exc:
+            raise ValueError(f"{field} contains invalid JPEG bytes: {exc}") from exc
+
     def _source_image(self, entry: dict, camera_name: str) -> np.ndarray:
+        """Return RGB pixels from either legacy arrays or compressed JPEG bytes."""
         images = entry.get("image")
         camera = images.get(camera_name) if isinstance(images, dict) else None
         value = camera.get("color") if isinstance(camera, dict) else None
         if value is None:
             raise ValueError(f"missing image.{camera_name}.color")
-        image = np.asarray(value)
+        compressed = isinstance(value, (bytes, bytearray, memoryview))
+        if compressed:
+            encoding = camera.get("color_encoding")
+            if encoding is not None and str(encoding).lower() not in {"jpeg", "jpg", "image/jpeg"}:
+                raise ValueError(
+                    f"image.{camera_name}.color_encoding must identify JPEG; got {encoding!r}"
+                )
+            image = self._decode_jpeg(value, f"image.{camera_name}.color")
+        else:
+            image = np.asarray(value)
+        if image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(f"image.{camera_name}.color must be HWC RGB/BGR")
+        if self.image_height is None:
+            self.image_height = image.shape[0]
+        if self.image_width is None:
+            self.image_width = image.shape[1]
         expected_shape = (self.image_height, self.image_width, 3)
         if image.shape != expected_shape:
             raise ValueError(
@@ -212,24 +238,38 @@ class LeRobotV21Writer:
             raise ValueError(
                 f"image.{camera_name}.color has dtype {image.dtype}; expected uint8"
             )
+        if not compressed and self.camera_color_order[camera_name] == "bgr":
+            image = image[..., ::-1]
         return image
 
     def _build_frame(self, entry: dict) -> dict:
         state, action = self._state_action(entry)
         frame = {self.state_key: state, self.action_key: action}
+        frame.update(extract_hil_metadata(entry))
         for camera_name in CAMERA_NAMES:
             image = self._source_image(entry, camera_name)
-            if self.camera_color_order[camera_name] == "bgr":
-                image = image[..., ::-1]
             frame[self._image_key(camera_name)] = image
         return frame
 
     def _validate_episode(self, episode_data: Iterable[dict]) -> list[dict]:
         if not isinstance(episode_data, list) or not episode_data:
             raise ValueError("PKL must contain a non-empty List[Dict]")
+        expected_hil_keys = None
         for index, entry in enumerate(episode_data):
             if not isinstance(entry, dict):
                 raise ValueError(f"frame {index} is not a dictionary")
+            try:
+                hil_keys = set(extract_hil_metadata(entry))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"frame {index}: {exc}") from exc
+            if expected_hil_keys is None:
+                expected_hil_keys = hil_keys
+            elif hil_keys != expected_hil_keys:
+                raise ValueError(
+                    f"frame {index}: HIL metadata fields differ within episode; "
+                    f"missing={sorted(expected_hil_keys - hil_keys)}, "
+                    f"extra={sorted(hil_keys - expected_hil_keys)}"
+                )
             self._state_action(entry)
             for camera_name in CAMERA_NAMES:
                 self._source_image(entry, camera_name)
@@ -239,7 +279,7 @@ class LeRobotV21Writer:
         state_size = int(first_frame[self.state_key].shape[0])
         if state_size != len(TARGET_VECTOR_NAMES):
             raise ValueError(
-                f"target Tiangong2 schema requires 16 state/action values; got {state_size}"
+                f"G200 schema requires 16 state/action values; got {state_size}"
             )
         names = list(TARGET_VECTOR_NAMES)
         features = {
@@ -260,6 +300,9 @@ class LeRobotV21Writer:
                 "shape": (self.image_height, self.image_width, 3),
                 "names": ["height", "width", "channels"],
             }
+        for key, feature in HIL_FEATURES.items():
+            if key in first_frame:
+                features[key] = dict(feature)
         return features
 
     def _ensure_dataset(self, first_frame: dict) -> None:
@@ -276,16 +319,11 @@ class LeRobotV21Writer:
             repo_id=self.repo_id,
             root=self.root,
             fps=self.fps,
-            robot_type="Tiangong2",
+            robot_type="g200",
             features=self._features(first_frame),
             use_videos=self.use_videos,
             image_writer_threads=0,
         )
-        configure_direct_video = getattr(self.dataset, "configure_direct_video", None)
-        if callable(configure_direct_video):
-            configure_direct_video(
-                bitrates=self.direct_video_bitrates,
-            )
         _debug("阶段 5/8：准备数据集", "数据集创建完成，NumPy 直接视频编码已初始化")
 
     def _validate_existing_dataset(self, first_frame: dict) -> None:
@@ -300,6 +338,14 @@ class LeRobotV21Writer:
             info_path = self.root / "meta" / "info.json"
             with info_path.open("r", encoding="utf-8") as stream:
                 existing_features = (json.load(stream) or {}).get("features")
+        if existing_features is not None:
+            existing_hil = set(existing_features).intersection(HIL_FEATURES)
+            expected_hil = expected_keys.intersection(HIL_FEATURES)
+            if existing_hil != expected_hil:
+                raise ValueError(
+                    "HIL metadata fields differ from the existing dataset; "
+                    "use a new --dataset-name for a different annotation schema"
+                )
         if existing_features is None or not expected_keys.issubset(existing_features):
             raise ValueError(
                 "existing LeRobot dataset is missing configured feature keys"
@@ -362,6 +408,9 @@ class LeRobotV21Writer:
         _debug("阶段 4/8：数据校验", f"开始校验 {total_frames} 帧的状态、动作和三路图像")
         self._validate_episode(episode_data)
         first_frame = self._build_frame(episode_data[0])
+        hil_keys = sorted(set(first_frame).intersection(HIL_FEATURES))
+        if hil_keys:
+            _debug("人工接管标注", f"自动检测到逐帧字段：{', '.join(hil_keys)}")
         state_size = int(first_frame[self.state_key].shape[0])
         _debug(
             "阶段 4/8：数据校验",

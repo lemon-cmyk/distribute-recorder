@@ -1,12 +1,10 @@
 import json
-import shutil
 
 import numpy as np
 import pytest
 
 from tiangong_recorder.direct_lerobot_dataset import (
     compute_numpy_episode_stats,
-    compute_target_norm_stats,
 )
 from tiangong_recorder.lerobot_writer import OUTPUT_CAMERA_NAMES, LeRobotV21Writer
 
@@ -46,7 +44,7 @@ def test_numpy_image_stats_match_lerobot_shapes_and_normalization():
     assert stats["observation.state"]["mean"].tolist() == [2.0, 3.0]
 
 
-def _hardware_entry(index: int) -> dict:
+def _sample_entry(index: int) -> dict:
     head = np.full((480, 640, 3), (index * 20) % 255, dtype=np.uint8)
     wrist = np.zeros((480, 640, 3), dtype=np.uint8)
     wrist[..., 0] = 10 + index
@@ -68,44 +66,25 @@ def _hardware_entry(index: int) -> dict:
     }
 
 
-def test_target_norm_stats_uses_expected_keys_and_quantiles():
-    states = np.stack(
-        [np.arange(16, dtype=np.float32), np.arange(16, dtype=np.float32) + 10]
-    )
-    actions = states + 100
-
-    stats = compute_target_norm_stats(states, actions)
-
-    assert set(stats) == {"state", "actions"}
-    assert set(stats["state"]) == {"mean", "std", "q01", "q99"}
-    assert np.allclose(stats["state"]["mean"], np.arange(16) + 5)
-    assert np.allclose(stats["actions"]["q99"], np.arange(16) + 109.9)
-
-
-def test_direct_writer_hardware_av1_is_lerobot_readable(tmp_path):
+def test_direct_writer_software_av1_is_lerobot_readable(tmp_path):
     pytest.importorskip("lerobot")
     av = pytest.importorskip("av")
-    if shutil.which("gst-launch-1.0") is None:
-        pytest.skip("GStreamer is not installed")
-    if shutil.which("ffmpeg") is None:
-        pytest.skip("FFmpeg is not installed")
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     root = tmp_path / "direct_dataset"
     writer = LeRobotV21Writer(
         dataset_root=root,
         repo_id="local/direct-test",
-        task="hardware encoding test",
+        task="software encoding test",
         fps=50,
         use_videos=True,
         image_width=640,
         image_height=480,
-        direct_video_bitrates={name: 1_000_000 for name in OUTPUT_CAMERA_NAMES},
     )
 
     frame_count = 12
     result = writer.write_episode(
-        [_hardware_entry(index) for index in range(frame_count)]
+        [_sample_entry(index) for index in range(frame_count)]
     )
     writer.close()
 
@@ -116,10 +95,10 @@ def test_direct_writer_hardware_av1_is_lerobot_readable(tmp_path):
     assert len(video_paths) == len(OUTPUT_CAMERA_NAMES)
     assert not list(root.glob("**/*.ivf"))
     assert len(list(root.glob("data/**/*.parquet"))) == 1
-    assert (root / "norm_stats.json").is_file()
+    assert not (root / "norm_stats.json").exists()
     with (root / "meta" / "info.json").open(encoding="utf-8") as stream:
         info = json.load(stream)
-    assert info["robot_type"] == "Tiangong2"
+    assert info["robot_type"] == "g200"
     for camera_name in OUTPUT_CAMERA_NAMES:
         assert (
             info["features"][f"observation.images.{camera_name}"]["info"]["video.codec"]

@@ -90,7 +90,7 @@ def make_entry():
     }
 
 
-def make_writer(tmp_path):
+def make_writer(tmp_path, **kwargs):
     return LeRobotV21Writer(
         dataset_root=tmp_path / "dataset",
         repo_id="local/test",
@@ -100,11 +100,15 @@ def make_writer(tmp_path):
         image_width=3,
         image_height=2,
         _dataset_cls=FakeLeRobotDataset,
+        **kwargs,
     )
 
 
 def test_writer_maps_state_action_and_camera_color(tmp_path, capsys):
-    writer = make_writer(tmp_path)
+    writer = make_writer(
+        tmp_path,
+        camera_color_order={name: "bgr" for name in ("head", "left_wrist", "right_wrist")},
+    )
     result = writer.write_episode([make_entry(), make_entry()])
 
     assert result.episode_index == 0
@@ -121,7 +125,7 @@ def test_writer_maps_state_action_and_camera_color(tmp_path, capsys):
         frame["action"],
         [*range(14, 21), 0.3, *range(21, 28), 0.4],
     )
-    assert frame["observation.images.front"][0, 0].tolist() == [1, 2, 3]
+    assert frame["observation.images.front"][0, 0].tolist() == [3, 2, 1]
     assert frame["observation.images.left_wrist"][0, 0].tolist() == [30, 20, 10]
     assert writer.dataset.tasks == ["pick object", "pick object"]
     assert writer.dataset.features["observation.images.front"]["dtype"] == "video"
@@ -129,7 +133,7 @@ def test_writer_maps_state_action_and_camera_color(tmp_path, capsys):
     assert writer.dataset.features["action"]["names"] == list(TARGET_VECTOR_NAMES)
     with (writer.root / "meta" / "info.json").open(encoding="utf-8") as stream:
         info = json.load(stream)
-    assert info["robot_type"] == "Tiangong2"
+    assert info["robot_type"] == "g200"
     assert writer.verify_episode(0, 2)
     output = capsys.readouterr().out
     for stage in ("阶段 4/8", "阶段 5/8", "阶段 6/8", "阶段 7/8", "阶段 8/8"):
@@ -232,3 +236,14 @@ def test_writer_cleanup_does_not_mask_original_save_error(tmp_path, capsys):
     output = capsys.readouterr().out
     assert "synthetic cleanup failure" in output
     assert "继续抛出原始保存异常" in output
+
+
+def test_infers_size_and_rejects_later_mismatch(tmp_path):
+    writer = LeRobotV21Writer(dataset_root=tmp_path / "dynamic", repo_id="local/test",
+        task="test", fps=50, use_videos=True, _dataset_cls=FakeLeRobotDataset)
+    writer.write_episode([make_entry()])
+    assert tuple(writer.dataset.features["observation.images.front"]["shape"]) == (2, 3, 3)
+    bad = make_entry()
+    bad["image"]["right_wrist"]["color"] = np.zeros((4, 3, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="expected"):
+        writer.write_episode([bad])

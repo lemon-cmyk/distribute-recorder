@@ -19,8 +19,6 @@ import yaml
 from .conversion_state import ConversionRecord, ConversionState
 from .lerobot_writer import (
     CAMERA_NAMES,
-    DEFAULT_VIDEO_BITRATES,
-    OUTPUT_CAMERA_NAMES,
     LeRobotV21Writer,
 )
 
@@ -35,29 +33,28 @@ def _debug(stage: str, message: str) -> None:
 
 @dataclass(frozen=True)
 class ConverterConfig:
-    input_dir: str = "/home/nvidia/teleop_logs"
-    dataset_root: str = "/home/nvidia/lerobot_datasets/tiangong_teleop"
-    state_db: str = "/home/nvidia/lerobot_datasets/.tiangong_converter.sqlite3"
-    lock_file: str = "/home/nvidia/lerobot_datasets/.tiangong_converter.lock"
-    repo_id: str = "local/tiangong_teleop"
+    input_dir: str = "/home/grg/XRoboToolkit-Teleop-Sample-Python/logs/g200"
+    dataset_root: str = "/home/grg/lerobot_datasets/g200_teleop"
+    state_db: str = "/home/grg/lerobot_datasets/.g200_converter.sqlite3"
+    lock_file: str = "/home/grg/lerobot_datasets/.g200_converter.lock"
+    repo_id: str = "local/g200_teleop"
     fps: int = 50
-    task: str = "Teleoperate the Tiangong robot"
+    task: str = "Teleoperate the G200 robot"
     use_videos: bool = True
-    delete_source_pkl: bool = True
+    delete_source_pkl: bool = False
     poll_interval_s: float = 2.0
     retry_errors: bool = False
-    image_width: int = 640
-    image_height: int = 480
+    compute_source_sha256: bool = True
+    verify_source: bool = True
+    image_width: int | None = None
+    image_height: int | None = None
     state_key: str = "observation.state"
     action_key: str = "action"
     image_prefix: str = "observation.images"
     image_writer_threads: int = 2
-    direct_video_bitrates: dict[str, int] = field(
-        default_factory=lambda: dict(DEFAULT_VIDEO_BITRATES)
-    )
     camera_color_order: dict[str, str] = field(
         default_factory=lambda: {
-            "head": "rgb",
+            "head": "bgr",
             "left_wrist": "bgr",
             "right_wrist": "bgr",
         }
@@ -88,19 +85,25 @@ class ConverterConfig:
                 raise ValueError(f"{name} must not be empty")
         if not isinstance(self.fps, int) or isinstance(self.fps, bool) or self.fps <= 0:
             raise ValueError("fps must be a positive integer")
+        if not self.use_videos:
+            raise ValueError("NumPy direct conversion requires use_videos=true")
+        for dimension in (self.image_width, self.image_height):
+            if dimension is not None and (
+                isinstance(dimension, bool)
+                or not isinstance(dimension, int)
+                or dimension <= 0
+            ):
+                raise ValueError("image dimensions must be positive integers or null")
+        if any(order not in {"rgb", "bgr"} for order in self.camera_color_order.values()):
+            raise ValueError("camera color orders must be rgb or bgr")
         if self.poll_interval_s <= 0:
             raise ValueError("poll_interval_s must be positive")
+        if not isinstance(self.compute_source_sha256, bool):
+            raise ValueError("compute_source_sha256 must be true or false")
+        if not isinstance(self.verify_source, bool):
+            raise ValueError("verify_source must be true or false")
         if self.image_writer_threads < 0:
             raise ValueError("image_writer_threads must not be negative")
-        if set(self.direct_video_bitrates) != set(OUTPUT_CAMERA_NAMES):
-            raise ValueError(
-                f"direct_video_bitrates must contain exactly {OUTPUT_CAMERA_NAMES}"
-            )
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value <= 0
-            for value in self.direct_video_bitrates.values()
-        ):
-            raise ValueError("direct_video_bitrates values must be positive integers")
         if set(self.camera_color_order) != set(CAMERA_NAMES):
             raise ValueError(f"camera_color_order must contain exactly {CAMERA_NAMES}")
 
@@ -171,7 +174,6 @@ class PklToLeRobotConverter:
             image_prefix=config.image_prefix,
             camera_color_order=config.camera_color_order,
             image_writer_threads=config.image_writer_threads,
-            direct_video_bitrates=config.direct_video_bitrates,
         )
 
     @staticmethod
@@ -182,25 +184,54 @@ class PklToLeRobotConverter:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    @staticmethod
-    def _load_pickle(path: Path) -> list[dict[str, Any]]:
-        with path.open("rb") as stream:
-            value = pickle.load(stream)
+    def _source_fingerprint(self, path: Path) -> str:
+        if not self.config.verify_source:
+            return "unchecked"
+        if self.config.compute_source_sha256:
+            return self._sha256(path)
+        stat = path.stat()
+        return (
+            f"stat:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:"
+            f"{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+        )
+
+    def _load_pickle(self, path: Path) -> list[dict[str, Any]]:
+        attempt = 0
+        while True:
+            try:
+                with path.open("rb") as stream:
+                    value = pickle.load(stream)
+                break
+            except Exception as exc:
+                attempt += 1
+                _debug(
+                    "阶段 2/8：读取 PKL",
+                    f"{path.name} 第 {attempt} 次读取失败："
+                    f"{type(exc).__name__}: {exc}；"
+                    f"{self.config.poll_interval_s:g} 秒后重新读取",
+                )
+                time.sleep(self.config.poll_interval_s)
         if not isinstance(value, list) or not value:
             raise ValueError("PKL must contain a non-empty List[Dict]")
         return value
 
-    def _delete_source(self, path: Path, expected_sha256: str) -> None:
+    def _delete_source(self, path: Path, expected_fingerprint: str) -> None:
         if not path.exists():
             self.state.mark_deleted(path)
             _debug("源文件处理", f"源 PKL 已不存在，仅更新删除状态：{path}")
             return
-        _debug("源文件处理", f"删除前再次校验 SHA256：{path.name}")
-        actual_sha256 = self._sha256(path)
-        if actual_sha256 != expected_sha256:
-            raise RuntimeError(
-                "source PKL changed after conversion; refusing to delete it"
+        if self.config.verify_source:
+            fingerprint_name = (
+                "SHA256" if self.config.compute_source_sha256 else "文件元数据"
             )
+            _debug("源文件处理", f"删除前再次校验{fingerprint_name}：{path.name}")
+            actual_fingerprint = self._source_fingerprint(path)
+            if actual_fingerprint != expected_fingerprint:
+                raise RuntimeError(
+                    "source PKL changed after conversion; refusing to delete it"
+                )
+        else:
+            _debug("源文件处理", f"源文件校验已关闭，直接删除：{path.name}")
         path.unlink()
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -219,7 +250,7 @@ class PklToLeRobotConverter:
         if record is None:
             _debug("历史状态", "没有历史转换记录，将作为新文件转换")
             return None
-        if record.source_sha256 != source_sha256:
+        if self.config.verify_source and record.source_sha256 != source_sha256:
             if record.status == "done":
                 raise RuntimeError(
                     "a previously converted source path now contains different data"
@@ -281,13 +312,23 @@ class PklToLeRobotConverter:
             _debug("文件开始", f"开始处理 {path.name}，大小 {size_gib:.2f} GiB")
 
             stage_started_at = time.monotonic()
-            _debug("阶段 1/8：完整性校验", "开始计算源 PKL 的 SHA256")
-            source_sha256 = self._sha256(path)
-            _debug(
-                "阶段 1/8：完整性校验",
-                f"SHA256 完成，用时 {time.monotonic() - stage_started_at:.1f} 秒，"
-                f"摘要 {source_sha256[:12]}...",
-            )
+            if not self.config.verify_source:
+                _debug("阶段 1/8：完整性校验", "源文件校验已关闭，不计算 SHA256 或文件元数据指纹")
+                source_sha256 = self._source_fingerprint(path)
+            elif self.config.compute_source_sha256:
+                _debug("阶段 1/8：完整性校验", "开始计算源 PKL 的 SHA256")
+                source_sha256 = self._source_fingerprint(path)
+                _debug(
+                    "阶段 1/8：完整性校验",
+                    f"SHA256 完成，用时 {time.monotonic() - stage_started_at:.1f} 秒，"
+                    f"摘要 {source_sha256[:12]}...",
+                )
+            else:
+                _debug(
+                    "阶段 1/8：完整性校验",
+                    "SHA256 已关闭，使用文件元数据快速识别源 PKL",
+                )
+                source_sha256 = self._source_fingerprint(path)
             reconciled = self._reconcile_record(path, source_sha256, record)
             if reconciled is not None:
                 return reconciled
@@ -399,12 +440,17 @@ def _acquire_singleton_lock(path: str | Path):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Convert Tiangong PKLs into LeRobot v2.1"
+        description="Convert G200 PKLs into LeRobot v2.1"
     )
     parser.add_argument("--config", default="config/converter.yaml")
     parser.add_argument("--once", action="store_true", help="scan once and exit")
     parser.add_argument("--retry-errors", action="store_true")
     parser.add_argument("--keep-source", action="store_true")
+    parser.add_argument(
+        "--no-source-verification",
+        action="store_true",
+        help="skip source SHA256/metadata checks; deduplicate by path and delete without checking changes",
+    )
     parser.add_argument(
         "--dataset-name",
         help="LeRobot dataset directory name; also derives state DB, lock, and repo_id",
@@ -425,6 +471,8 @@ def main(argv: list[str] | None = None) -> int:
         config = replace(config, retry_errors=True)
     if args.keep_source:
         config = replace(config, delete_source_pkl=False)
+    if args.no_source_verification:
+        config = replace(config, verify_source=False)
 
     dataset_root = Path(config.dataset_root).expanduser()
     if dataset_root.exists() or dataset_root.is_symlink():
@@ -443,11 +491,12 @@ def main(argv: list[str] | None = None) -> int:
     _debug(
         "程序启动",
         f"FPS={config.fps}，视频模式={config.use_videos}，"
-        f"保留源 PKL={not config.delete_source_pkl}，重试失败={config.retry_errors}",
+        f"保留源 PKL={not config.delete_source_pkl}，重试失败={config.retry_errors}，"
+        f"源文件校验={config.verify_source}",
     )
     _debug(
         "程序启动",
-        f"视频编码=Jetson 硬件 AV1，码率={config.direct_video_bitrates}",
+        "视频编码=软件 libsvtav1，CRF=30，GOP=2",
     )
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.default_int_handler)

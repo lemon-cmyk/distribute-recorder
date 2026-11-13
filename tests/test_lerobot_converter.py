@@ -43,6 +43,7 @@ def make_config(tmp_path, **overrides):
         "repo_id": "local/test",
         "image_width": 3,
         "image_height": 2,
+        "delete_source_pkl": True,
     }
     values.update(overrides)
     return ConverterConfig(**values)
@@ -52,6 +53,36 @@ def write_pickle(path, frame_count=2):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as stream:
         pickle.dump([{"frame": index} for index in range(frame_count)], stream)
+
+
+def test_load_pickle_retries_without_limit_until_read_succeeds(
+    tmp_path, monkeypatch, capsys
+):
+    config = make_config(tmp_path, poll_interval_s=0.25)
+    source = Path(config.input_dir) / "episode_0001.pkl"
+    write_pickle(source, 3)
+    converter = PklToLeRobotConverter(
+        config, writer=FakeWriter(config.dataset_root)
+    )
+    real_load = pickle.load
+    attempts = 0
+    sleeps = []
+
+    def flaky_load(stream):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise EOFError("Ran out of input")
+        return real_load(stream)
+
+    monkeypatch.setattr(converter_module.pickle, "load", flaky_load)
+    monkeypatch.setattr(converter_module.time, "sleep", sleeps.append)
+
+    assert len(converter._load_pickle(source)) == 3
+    assert attempts == 4
+    assert sleeps == [0.25, 0.25, 0.25]
+    assert "EOFError: Ran out of input" in capsys.readouterr().out
+    converter.close()
 
 
 def test_cli_dataset_name_and_task_derive_isolated_paths(tmp_path):
@@ -245,3 +276,7 @@ def test_main_rejects_existing_dataset_before_lock(tmp_path, monkeypatch, capsys
     assert converter_module.main(["--config", str(config_path)]) == 2
     assert not lock_called
     assert "同名数据集已经存在" in capsys.readouterr().out
+
+
+def test_default_keeps_source():
+    assert ConverterConfig().delete_source_pkl is False

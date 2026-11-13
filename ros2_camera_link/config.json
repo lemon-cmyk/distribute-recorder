@@ -1,0 +1,45 @@
+{
+  "device": "thor1",
+  "device_role": "receiver",
+  "domain_id": 14,
+  "ros_distro": "jazzy",
+  "internal_ip": "192.168.3.105",
+  "peers": [
+    "192.168.3.102"
+  ],
+  "cameras": {
+    "gemini2_serial": "AY6R463002Y",
+    "left_serial": "260322271699",
+    "right_serial": "260322270752"
+  },
+  "driver_mode": "none",
+  "driver_setup_files": [],
+  "orbbec_workspace": "",
+  "validated_packages": {
+    "rmw_fastrtps_cpp": {
+      "prefix": "/opt/ros/jazzy",
+      "share": "/opt/ros/jazzy/share/rmw_fastrtps_cpp",
+      "version": "8.4.4"
+    },
+    "ros2cli": {
+      "prefix": "/opt/ros/jazzy",
+      "share": "/opt/ros/jazzy/share/ros2cli",
+      "version": "0.32.13"
+    },
+    "ros2topic": {
+      "prefix": "/opt/ros/jazzy",
+      "share": "/opt/ros/jazzy/share/ros2topic",
+      "version": "0.32.13"
+    },
+    "rclpy": {
+      "prefix": "/opt/ros/jazzy",
+      "share": "/opt/ros/jazzy/share/rclpy",
+      "version": "7.1.12"
+    },
+    "sensor_msgs": {
+      "prefix": "/opt/ros/jazzy",
+      "share": "/opt/ros/jazzy/share/sensor_msgs",
+      "version": "5.3.8"
+    }
+  }
+}

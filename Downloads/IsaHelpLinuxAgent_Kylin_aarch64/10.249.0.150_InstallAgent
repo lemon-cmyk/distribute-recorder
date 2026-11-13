@@ -1,0 +1,365 @@
+#!/bin/bash
+Dir=/opt/asmagent
+EtcDir=${Dir}/etc
+BinDir=${Dir}/bin
+LibDir=${Dir}/lib
+IconsDir=${Dir}/icons
+DataDir=${Dir}/data
+ConfDir=${DataDir}/conf
+
+#银河麒麟mips架构，安装设置了环境变量，导致更新脚本指令无效，所以先取消环境变量
+unset LD_LIBRARY_PATH 
+
+k_version=`uname -r`
+machine_type=`uname -m`
+k_module_dir="${Dir}/modules"
+Name="LinuxAgent"
+tgz_name="${Name}"".tgz"
+tgz_machine_name=""
+mysvc="IsaAgent.service"
+
+if [ -n "${machine_type}" ]; then
+    tgz_machine_name=${Name}_${machine_type}.tgz
+fi
+
+#get asmip 
+local_path=`pwd`
+file_name=$0
+install_path=${file_name%/*}
+name=${file_name##*/}
+asmip=${name%%_*}
+
+func_insmod_ko()
+{
+	modprobe ipt_ULOG >/dev/null 2>&1
+	ipt_ulog_k="$(lsmod | awk "/^ipt_ULOG/ {print \$1}")"
+	if [ "x$ipt_ulog_k" = "x" ]; then
+		if [ ! -f "/lib/modules/${k_version}/kernel/net/ipv4/netfilter/ipt_ULOG.ko" ]; then
+			cp ${k_module_dir}/${machine_type}/${k_version}/ipt_ULOG.ko /lib/modules/${k_version}/kernel/net/ipv4/netfilter/
+		fi
+		depmod -A	
+		modprobe ipt_ULOG
+	fi
+	return 0
+}
+
+func_check_tgz()
+{
+  nRet=1
+
+  if [ -f "${install_path}/${tgz_name}" ];then
+      mkdir -p ${DataDir}/update
+      md5=`md5sum ${install_path}/$tgz_name | awk '{print $1}'`
+      echo "MD5=\"$md5\"" > ${DataDir}/update/OidMd5
+     
+      IsUbuntu=`tar tf ${install_path}/${tgz_name} | grep ${Name} | grep '.tgz'` 
+      if [ -n "${IsUbuntu}" ];then
+          tar zxf ${install_path}/${tgz_name} -C ${install_path}/
+          if [ -f "${install_path}/${tgz_machine_name}" ];then
+              tgz_name="${tgz_machine_name}"
+              nRet=0
+          else
+              echo "${install_path}/${tgz_machine_name} no exist!"
+          fi
+      else
+          nRet=0
+      fi
+  else
+      echo "${install_path}/${tgz_name} no exist!"
+  fi
+
+  return ${nRet}
+}
+
+func_mv_file()
+{
+  system_dir=""
+  init_dir=""
+
+  if [ -d "/usr/lib/systemd/system/" ];then
+      system_dir="/usr/lib/systemd/system/"
+  elif [ -d "/lib/systemd/system/" ];then
+      system_dir="/lib/systemd/system/"
+  fi
+
+  if [ -d "/etc/init.d/" ];then
+      init_dir="/etc/init.d/"
+  elif [ -d "/etc/rc.d/init.d/" ];then
+      init_dir="/etc/rc.d/init.d/"
+  fi
+
+  if [ -z "${system_dir}" -a -z "${init_dir}" ];then
+      echo "no dir: init.d and system"
+      echo "install fail!"
+      return -1
+  fi
+
+  local test_system=`systemctl > /dev/null 2>&1 && echo ok`
+  if [ -n "${system_dir}" -a -n "${test_system}" ];then
+      cp -f ${EtcDir}/IsaAgent.service   ${system_dir}
+  elif [ -n "${init_dir}" ];then
+      cp -f ${EtcDir}/IsaAgentd  ${init_dir}
+      cd /etc/rc2.d && ln -s  ../init.d/IsaAgentd  S99IsaAgentd 
+      cd /etc/rc3.d && ln -s  ../init.d/IsaAgentd  S99IsaAgentd 
+      cd /etc/rc5.d && ln -s  ../init.d/IsaAgentd  S99IsaAgentd 
+  else
+      echo "mv service fail!"
+      echo "install fail!"
+      return -1 
+  fi
+
+  #modify by likz 做包的时候会写入默认IP，tgz安装时重新写入真实IP
+  #if [ ! -f "${ConfDir}/DB.ini" ];then
+  echo  "ServerIP="$asmip    > ${ConfDir}/DB.ini
+  #fi
+
+  ${BinDir}/install_desktop.sh 
+
+  # up by daomh 2018-12-14 有高版本的libstdc++6 就不用安装包带的了
+  DpkgType=`dpkg --help >/dev/null 2>&1 && echo ok`
+  if [ -n "${DpkgType}" -a "ok" == "${DpkgType}" ];then
+    RetDpkg=`dpkg -L libstdc++6 2>/dev/null | grep libstdc++.so.6$ | head -n 1`
+  else
+    RetDpkg=`rpm -ql libstdc++ | grep libstdc++.so.6$ | head -n 1`
+  fi
+  if [ -n "${RetDpkg}" ];then
+   # RetStr=`strings ${RetDpkg} | grep GLIBCXX_3.4.21`
+   # modify by xuyc 20201130 ubunt20点击菜单web认证无法拉起火狐浏览器打开入网流程
+   RetStr=`grep GLIBCXX_3.4.21 ${RetDpkg}`
+	if [ -n "${RetStr}" ];then
+	  rm ${LibDir}/libstdc++.so.6 -f
+	fi
+  fi
+  
+  if [ "${machine_type}" == "aarch64" ];then
+    rm_flag=0
+    version=`echo ${k_version} | awk -F '-' '{print$1}'`
+    version_1=`echo ${version} | awk -F '.' '{print$1}'`
+    version_2=`echo ${version} | awk -F '.' '{print$2}'`
+    version_3=`echo ${version} | awk -F '.' '{print$3}'`
+    if [ $version_1 -gt 4 ];then
+        rm_flag=1
+    elif [ $version_1 -eq 4 -a $version_2 -gt 4 ];then
+        rm_flag=1
+    elif [ $version_1 -eq 4 -a $version_2 -eq 4 -a $version_3 -ge 58 ];then
+        rm_flag=1
+    fi
+    if [ $rm_flag -eq 1 ];then
+        rm ${LibDir}/libc.so.6 -f
+        rm ${LibDir}/libdl.so.2 -f
+        rm ${LibDir}/libgcc_s.so.1 -f
+        rm ${LibDir}/libglib-2.0.so.0 -f
+        rm ${LibDir}/libpthread.so.0 -f
+        #rm ${LibDir}/libstdc++.so.6 -f
+		rm ${LibDir}/libfontconfig.so.1 -f
+        rm ${LibDir}/libz.so.1 -f
+        rm ${LibDir}/libm.so.6 -f
+        rm ${LibDir}/libfreetype.so.6 -f
+        rm ${LibDir}/libharfbuzz.so.0 -f
+    fi
+  fi
+  
+  # MIPS架构银河麒麟V10取消对libc.so.6的依赖
+  if [ "${machine_type}" == "mips64" ];then
+	rm_flag=0
+    version=`echo ${k_version} | awk -F '-' '{print$1}'`
+    version_1=`echo ${version} | awk -F '.' '{print$1}'`
+    version_2=`echo ${version} | awk -F '.' '{print$2}'`
+    version_3=`echo ${version} | awk -F '.' '{print$3}'`
+    if [ $version_1 -gt 2 ];then
+        rm_flag=1
+    elif [ $version_1 -eq 4 -a $version_2 -gt 4 ];then
+        rm_flag=1
+    elif [ $version_1 -eq 4 -a $version_2 -eq 4 -a $version_3 -ge 58 ];then
+        rm_flag=1
+    fi
+    if [ $rm_flag -eq 1 ];then
+        rm ${LibDir}/libc.so.6 -f
+		rm ${LibDir}/libfontconfig.so.1 -f
+    fi
+  fi  
+}
+
+func_make_dot1x_ini()
+{
+    local Dot1x_ini=dot1x.ini
+
+    if [ ! -f "${DataDir}/${Dot1x_ini}" ];then
+        echo "[General]"      > ${DataDir}/${Dot1x_ini}
+        echo "Enable=0"      >> ${DataDir}/${Dot1x_ini}
+        echo "Interface="    >> ${DataDir}/${Dot1x_ini}
+        echo "IsAutoLogin=0" >> ${DataDir}/${Dot1x_ini}
+        echo "Passwd="       >> ${DataDir}/${Dot1x_ini}
+        echo "UserName="     >> ${DataDir}/${Dot1x_ini}
+    fi
+
+    chmod 777 ${DataDir}/${Dot1x_ini}
+}
+
+func_is_user()
+{
+    [ $# -ne 2 ] && return 2
+    
+    local UserName=$1
+    local ID=$2
+
+    if [[ "${ID}" =~ ^id=:[0-9]{1,3}$ ]];then
+        if [[ "${UserName}" =~ ^tty[0-9]{1,3}$|^:[0-9]{1,3}$ ]];then
+            return 1
+        fi
+    fi 
+
+    return 0
+}
+
+func_running()
+{
+    export LD_LIBRARY_PATH=${LibDir}:${LD_LIBRARY_PATH}
+    ln -s /usr/lib/libudev.so.1 /usr/lib/libudev.so.0 >/dev/null 2>&1
+
+    # pyqt4 小助手托盘
+    # kill 掉旧版 托盘
+    killall -9 -e "${BinDir}/IsaHelpMain"
+    pid=`ps -ef | grep "${BinDir}/IsaHelpMain" | grep -v grep | awk '{printf $2}'`
+    if [ -n "$pid" ];then
+        kill -9 $pid  2>/dev/null
+    fi
+    
+    # 自动更新的时候，托盘会有问题
+    pid=`ps -ef | grep "${BinDir}/IsaHelpTray" | grep -v grep `
+    if [ -z "$pid" ];then
+        # qt 托盘  # (:0.0) (:1.0)  (:0) (:1) 
+        # 考虑多用户情况
+        local num=0
+        local user_name=""
+        local tmp_display=""
+        TmpFile=${DataDir}/logs/install.log
+        who | grep -v "pts" > ${TmpFile}
+        while read LINE
+        do
+            i=0
+            user_name=""
+            tmp_display=""
+            for TmpStr in $LINE
+            do
+                if [ $i -eq 0 ];then
+                    user_name=${TmpStr}
+                else
+                    tmp_display=`echo "${TmpStr}" | grep -E "\(:[0-9]{0,2}.0\)" | grep -oE ":[0-9]{0,2}.0"`
+                    if [ -z "${tmp_display}" ];then
+                        tmp_display=`echo "${TmpStr}" | grep -E "\(:[0-9]\)" | grep -oE ":[0-9]"`
+                        if [ -n "${tmp_display}" ];then
+                            break
+                        fi
+                    else
+                        break
+                    fi
+                fi
+                ((i++))
+            done
+            
+            if [ -n "${user_name}" ];then
+                if [ -z "${tmp_display}" ];then
+                    tmp_display=":${num}.0"
+                fi
+                if [ "${user_name}" != "root" ];then
+                    su - ${user_name} <<EOF
+                export LD_LIBRARY_PATH=${LibDir} ;
+                export DISPLAY=$tmp_display ;
+                xhost + ;
+                ${BinDir}/IsaHelpTray 2>/dev/null ;
+                exit ;
+EOF
+                else
+                    export LD_LIBRARY_PATH=${LibDir}
+                    export DISPLAY=$tmp_display
+                    xhost + 
+                    ${BinDir}/IsaHelpTray 2>/dev/null
+                fi
+            fi
+            ((num++))
+
+        done < ${TmpFile}
+    fi
+
+    pid=`ps -ef | grep "${BinDir}/IsaHelpTray" | grep -v grep | awk '{print $2}'`
+    if [ -n "$pid" ];then
+        echo "IsaHelpTray success"
+    else
+         user=`who -ud |awk '{print $1,$2,$7}' |grep -v pts `
+         user_name=`echo $user | awk '{print $1}'`
+         if [ "${user_name}" != "root" ] ;then
+             su - ${user_name} <<EOF
+                export LD_LIBRARY_PATH=${LibDir} ;
+                export DISPLAY=:0.0 ;
+		xhost + ;
+                ${BinDir}/IsaHelpTray 2>/dev/null ;
+                exit ;
+EOF
+            else
+                export DISPLAY=:0.0
+                xhost + 
+                ${BinDir}/IsaHelpTray 2>/dev/null
+            fi
+    fi
+    
+    
+    #then  start isactrl service
+    if [ -f ${system_dir}IsaAgent.service ];then
+        systemctl enable $mysvc >/dev/null 
+    fi
+
+    nohup ${EtcDir}/IsaAgentd restart >/dev/null 2>&1
+    sleep 1
+
+    pid=`ps -ef | grep ${BinDir}/IsaCtrl | grep -v grep | awk '{print $2}'`
+    if [ -n "$pid" ];then
+        echo "isactrl success"
+    else
+        echo "isactrl fail"
+    fi
+
+    pid=`ps -ef | grep ${BinDir}/AgentExeC | grep -v grep | awk '{print $2}'`
+    if [ -n "$pid" ];then
+        echo "AgentExec success"
+    else
+        echo "AgentExec fail"
+    fi
+}
+
+if [ `id -u` -ne 0 ]; then
+    #echo "Warning: please run as root."
+    nohup sudo $file_name
+    exit 
+fi
+
+func_check_tgz
+[ $? -ne 0 ] && exit -1
+
+# 配置文件不覆盖 up by daomh 2018-11-21
+if [ -f "${ConfDir}/IsaAgent.ini" ];then
+    cp ${ConfDir}/IsaAgent.ini ${ConfDir}/IsaAgent.bak -f
+fi
+
+#unzip LinuxAgent.tgz and copy files to destination directory
+tar zxf ${install_path}/$tgz_name -C /
+if [ $? -ne 0 ] ; then
+  echo "tar zxvf $tgz_name fail" ;
+  exit -1
+else
+  func_mv_file
+  func_make_dot1x_ini
+  #func_insmod_ko 违规外联已经去内核了
+  if [ -f "${ConfDir}/IsaAgent.bak" ];then
+      mv ${ConfDir}/IsaAgent.bak ${ConfDir}/IsaAgent.ini -f
+  fi
+fi
+
+if [ $? -ne 0 ] ; then
+  exit -1
+else
+  func_running
+fi
+
+echo "install ok";
+exit 0

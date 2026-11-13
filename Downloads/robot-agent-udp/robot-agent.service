@@ -1,0 +1,24 @@
+[Unit]
+Description=Robot IP heartbeat agent
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=robot-agent
+Group=robot-agent
+WorkingDirectory=/opt/robot-agent
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/robot-agent/agent.py --config /etc/robot-agent.json
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

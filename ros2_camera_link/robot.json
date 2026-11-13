@@ -1,0 +1,28 @@
+{
+  "domain_id": 14,
+  "user": "grg",
+  "build_jobs": 2,
+  "drivers": {
+    "mode": "reuse",
+    "setup_files": [
+      "/home/grg/orb_ros2/install/local_setup.bash"
+    ]
+  },
+  "devices": {
+    "x86": {
+      "role": "publisher",
+      "internal_ip": "192.168.3.102",
+      "ros_distro": "humble"
+    },
+    "thor1": {
+      "role": "receiver",
+      "internal_ip": "192.168.3.105",
+      "ros_distro": "jazzy"
+    }
+  },
+  "cameras": {
+    "gemini2_serial": "AY6R463002Y",
+    "left_serial": "260322271699",
+    "right_serial": "260322270752"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "addresses": {
+    "rc": 0,
+    "stdout": "[{\"ifindex\":1,\"ifname\":\"lo\",\"flags\":[\"LOOPBACK\",\"UP\",\"LOWER_UP\"],\"mtu\":65536,\"qdisc\":\"noqueue\",\"operstate\":\"UNKNOWN\",\"group\":\"default\",\"txqlen\":1000,\"addr_info\":[{\"family\":\"inet\",\"local\":\"127.0.0.1\",\"prefixlen\":8,\"scope\":\"host\",\"label\":\"lo\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]},{\"ifindex\":9,\"ifname\":\"enP2p1s0\",\"flags\":[\"BROADCAST\",\"MULTICAST\",\"UP\",\"LOWER_UP\"],\"mtu\":1500,\"qdisc\":\"mq\",\"operstate\":\"UP\",\"group\":\"default\",\"txqlen\":1000,\"addr_info\":[{\"family\":\"inet\",\"local\":\"192.168.3.105\",\"prefixlen\":24,\"broadcast\":\"192.168.3.255\",\"scope\":\"global\",\"noprefixroute\":true,\"label\":\"enP2p1s0\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]},{\"ifindex\":11,\"ifname\":\"wlP1p1s0\",\"flags\":[\"BROADCAST\",\"MULTICAST\",\"UP\",\"LOWER_UP\"],\"mtu\":1500,\"qdisc\":\"mq\",\"operstate\":\"UP\",\"group\":\"default\",\"txqlen\":1000,\"addr_info\":[{\"family\":\"inet\",\"local\":\"10.1.52.53\",\"prefixlen\":24,\"broadcast\":\"10.1.52.255\",\"scope\":\"global\",\"dynamic\":true,\"noprefixroute\":true,\"label\":\"wlP1p1s0\",\"valid_life_time\":1974,\"preferred_life_time\":1974}]},{\"ifindex\":12,\"ifname\":\"l4tbr0\",\"flags\":[\"NO-CARRIER\",\"BROADCAST\",\"MULTICAST\",\"UP\"],\"mtu\":1500,\"qdisc\":\"noqueue\",\"operstate\":\"DOWN\",\"group\":\"default\",\"txqlen\":1000,\"addr_info\":[{\"family\":\"inet\",\"local\":\"192.168.55.1\",\"prefixlen\":24,\"scope\":\"global\",\"label\":\"l4tbr0\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]},{\"ifindex\":15,\"ifname\":\"docker0\",\"flags\":[\"NO-CARRIER\",\"BROADCAST\",\"MULTICAST\",\"UP\"],\"mtu\":1500,\"qdisc\":\"noqueue\",\"operstate\":\"DOWN\",\"group\":\"default\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"172.17.0.1\",\"prefixlen\":16,\"broadcast\":\"172.17.255.255\",\"scope\":\"global\",\"label\":\"docker0\",\"valid_life_time\":4294967295,\"preferred_life_time\":4294967295}]}]\n",
+    "stderr": ""
+  },
+  "services": {
+    "rc": 0,
+    "stdout": "NRestarts=0\nId=orbbec-camera.service\nActiveState=inactive\nSubState=dead\nUnitFileState=\n\nNRestarts=0\nId=realsense-dual.service\nActiveState=inactive\nSubState=dead\nUnitFileState=\n\nNRestarts=0\nId=ros2-camera-buffers.service\nActiveState=active\nSubState=exited\nUnitFileState=enabled\n",
+    "stderr": ""
+  },
+  "buffers": {
+    "rc": 0,
+    "stdout": "net.core.rmem_max = 8388608\nnet.core.wmem_max = 8388608\n",
+    "stderr": ""
+  },
+  "camera_journal": {
+    "rc": 0,
+    "stdout": "-- No entries --\n",
+    "stderr": ""
+  },
+  "wired": {
+    "rc": 0,
+    "stdout": "Settings for enP2p1s0:\n\tSupported ports: [ TP ]\n\tSupported link modes:   10baseT/Half 10baseT/Full\n\t                        100baseT/Half 100baseT/Full\n\t                        1000baseT/Full\n\t                        2500baseT/Full\n\t                        5000baseT/Full\n\tSupported pause frame use: Symmetric Receive-only\n\tSupports auto-negotiation: Yes\n\tSupported FEC modes: Not reported\n\tAdvertised link modes:  10baseT/Half 10baseT/Full\n\t                        100baseT/Half 100baseT/Full\n\t                        1000baseT/Full\n\t                        2500baseT/Full\n\t                        5000baseT/Full\n\tAdvertised pause frame use: Symmetric Receive-only\n\tAdvertised auto-negotiation: Yes\n\tAdvertised FEC modes: Not reported\n\tLink partner advertised link modes:  10baseT/Half 10baseT/Full\n\t                                     100baseT/Half 100baseT/Full\n\t                                     1000baseT/Full\n\tLink partner advertised pause frame use: Symmetric\n\tLink partner advertised auto-negotiation: Yes\n\tLink partner advertised FEC modes: Not reported\n\tSpeed: 1000Mb/s\n\tDuplex: Full\n\tAuto-negotiation: on\n\tPort: Twisted Pair\n\tPHYAD: 0\n\tTransceiver: internal\n\tMDI-X: on\n\tSupports Wake-on: pumbg\n\tWake-on: g\n        Current message level: 0x00000033 (51)\n                               drv probe ifdown ifup\n\tLink detected: yes\n",
+    "stderr": ""
+  }
+}

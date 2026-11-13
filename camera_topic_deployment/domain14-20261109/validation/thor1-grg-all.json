@@ -1,0 +1,125 @@
+{
+  "domain": "14",
+  "rmw": "rmw_fastrtps_cpp",
+  "xml": "/tmp/ros2-camera-topic-2002/subscriber-udp.xml",
+  "measurement_seconds": 30.0,
+  "warmup_seconds": 5.0,
+  "topics": {
+    "/camera/color/image_raw": {
+      "messages": 0,
+      "arrival_hz": null,
+      "stamp_hz": null,
+      "max_arrival_gap_ms": null,
+      "arrival_gap_p95_ms": null,
+      "max_stamp_gap_ms": null,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827ebe6ee7be0000000000008103",
+          "reliability": "2",
+          "durability": "2"
+        }
+      ]
+    },
+    "/camera/depth/image_raw": {
+      "messages": 0,
+      "arrival_hz": null,
+      "stamp_hz": null,
+      "max_arrival_gap_ms": null,
+      "arrival_gap_p95_ms": null,
+      "max_stamp_gap_ms": null,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827ebe6ee7be0000000000008603",
+          "reliability": "2",
+          "durability": "2"
+        }
+      ]
+    },
+    "/wrist_cameras/left/color/image_raw": {
+      "messages": 0,
+      "arrival_hz": null,
+      "stamp_hz": null,
+      "max_arrival_gap_ms": null,
+      "arrival_gap_p95_ms": null,
+      "max_stamp_gap_ms": null,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827eb76ef1000000000000001503",
+          "reliability": "1",
+          "durability": "1"
+        }
+      ]
+    },
+    "/wrist_cameras/left/depth/image_rect_raw": {
+      "messages": 0,
+      "arrival_hz": null,
+      "stamp_hz": null,
+      "max_arrival_gap_ms": null,
+      "arrival_gap_p95_ms": null,
+      "max_stamp_gap_ms": null,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827eb76ef1000000000000001c03",
+          "reliability": "1",
+          "durability": "1"
+        }
+      ]
+    },
+    "/wrist_cameras/right/color/image_raw": {
+      "messages": 0,
+      "arrival_hz": null,
+      "stamp_hz": null,
+      "max_arrival_gap_ms": null,
+      "arrival_gap_p95_ms": null,
+      "max_stamp_gap_ms": null,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827e846f2a8d0000000000001503",
+          "reliability": "1",
+          "durability": "1"
+        }
+      ]
+    },
+    "/wrist_cameras/right/depth/image_rect_raw": {
+      "messages": 0,
+      "arrival_hz": null,
+      "stamp_hz": null,
+      "max_arrival_gap_ms": null,
+      "arrival_gap_p95_ms": null,
+      "max_stamp_gap_ms": null,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827e846f2a8d0000000000001c03",
+          "reliability": "1",
+          "durability": "1"
+        }
+      ]
+    }
+  },
+  "all_topics_received": false,
+  "note": "Receiving messages is not a frequency/stability acceptance test; compare with each stream configuration and local baseline."
+}

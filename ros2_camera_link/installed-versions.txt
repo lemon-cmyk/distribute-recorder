@@ -1,0 +1,8 @@
+rmw_fastrtps_cpp	8.4.4	/opt/ros/jazzy
+ros2cli	0.32.13	/opt/ros/jazzy
+ros2topic	0.32.13	/opt/ros/jazzy
+rclpy	7.1.12	/opt/ros/jazzy
+sensor_msgs	5.3.8	/opt/ros/jazzy
+
+APT entries (when installed):
+ros-jazzy-rmw-fastrtps-cpp	8.4.4-1noble.20260911.054759

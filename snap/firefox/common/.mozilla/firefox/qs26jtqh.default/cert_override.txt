@@ -1,0 +1,4 @@
+# PSM Certificate Override Settings file
+# This is a generated file!  Do not edit.
+10.249.0.150:443:	OID.2.16.840.1.101.3.4.2.1	F7:38:0F:BB:4A:22:E2:E0:70:C5:C7:42:18:02:C1:0A:52:14:94:55:1A:AD:5C:78:6A:52:A3:07:00:7D:17:D4	
+grgportal.grgbanking.com:443:	OID.2.16.840.1.101.3.4.2.1	F7:38:0F:BB:4A:22:E2:E0:70:C5:C7:42:18:02:C1:0A:52:14:94:55:1A:AD:5C:78:6A:52:A3:07:00:7D:17:D4	

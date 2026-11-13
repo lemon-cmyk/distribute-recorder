@@ -9,6 +9,7 @@ if [[ ! -x "${PYTHON}" ]]; then
     exit 1
 fi
 
+unset PYTHONPATH
 cd "${PROJECT_DIR}"
 COMMAND=(
     "${PYTHON}"

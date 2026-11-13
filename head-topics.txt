@@ -1,0 +1,2 @@
+/camera/color/image_raw
+/camera/depth/image_raw

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 from typing import Sequence, TextIO
@@ -57,33 +56,7 @@ class TerminalProgressBar:
             print(file=self.stream, flush=True)
 
 
-class HardwareVideoEncodingError(RuntimeError):
-    pass
-
-
-def _rgb_frame(frame: np.ndarray, width: int, height: int) -> np.ndarray:
-    value = np.asarray(frame)
-    expected_shape = (height, width, 3)
-    if value.shape != expected_shape or value.dtype != np.uint8:
-        raise ValueError(
-            f"video frame must be uint8 with shape {expected_shape}; "
-            f"got {value.dtype} {value.shape}"
-        )
-    return np.ascontiguousarray(value)
-
-
-def _stop_subprocess(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=3)
-
-
-def encode_rgb_frames_with_jetson_av1(
+def encode_rgb_frames_with_av1(
     frames: Sequence[np.ndarray],
     video_path: Path | str,
     *,
@@ -91,169 +64,35 @@ def encode_rgb_frames_with_jetson_av1(
     label: str,
     width: int,
     height: int,
-    bitrate: int,
 ) -> None:
-    """Encode seekable AV1 with Jetson NVENC, then losslessly remux IVF to MP4."""
+    """Encode RGB NumPy frames using LeRobot 0.3.3 default AV1 settings."""
+    import av
     if not frames:
         raise ValueError("cannot encode an empty video")
+    if fps <= 0 or width <= 0 or height <= 0:
+        raise ValueError("FPS and image dimensions must be positive")
+    av.codec.Codec("libsvtav1", "w")
     video_path = Path(video_path)
     video_path.parent.mkdir(parents=True, exist_ok=True)
-    video_path.unlink(missing_ok=True)
-    ivf_path = video_path.with_name(f".{video_path.name}.encoding.ivf")
-    remux_path = video_path.with_name(f".{video_path.stem}.remux.tmp.mp4")
-    ivf_path.unlink(missing_ok=True)
-    remux_path.unlink(missing_ok=True)
-
-    command = [
-        "gst-launch-1.0",
-        "-q",
-        "fdsrc",
-        "fd=0",
-        "!",
-        "rawvideoparse",
-        "format=rgb",
-        f"width={width}",
-        f"height={height}",
-        f"framerate={fps}/1",
-        "!",
-        "videoconvert",
-        "!",
-        "video/x-raw,format=I420",
-        "!",
-        "nvvidconv",
-        "!",
-        "video/x-raw(memory:NVMM),format=NV12",
-        "!",
-        "nvv4l2av1enc",
-        f"bitrate={bitrate}",
-        "control-rate=1",
-        "preset-level=2",
-        "maxperf-enable=true",
-        "enable-headers=true",
-        "insert-seq-hdr=true",
-        "iframeinterval=2",
-        "idrinterval=2",
-        "!",
-        "filesink",
-        f"location={ivf_path}",
-    ]
+    temporary = video_path.with_name(f".{video_path.stem}.encoding.mp4")
     progress = TerminalProgressBar(label)
-    progress.update(0, len(frames), force=True)
-    process = subprocess.Popen(
-        command,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        bufsize=0,
-    )
     try:
-        assert process.stdin is not None
-        for index, frame in enumerate(frames, start=1):
-            process.stdin.write(_rgb_frame(frame, width, height).tobytes())
-            progress.update(index, len(frames))
-        process.stdin.close()
-        return_code = process.wait()
-        stdout = (
-            process.stdout.read().decode("utf-8", errors="replace")
-            if process.stdout
-            else ""
-        )
-        stderr = (
-            process.stderr.read().decode("utf-8", errors="replace")
-            if process.stderr
-            else ""
-        )
-    except KeyboardInterrupt:
+        with av.open(str(temporary), "w") as output:
+            stream = output.add_stream("libsvtav1", fps, options={"g": "2", "crf": "30"})
+            stream.width, stream.height = width, height
+            stream.pix_fmt = "yuv420p"
+            for index, frame in enumerate(frames, 1):
+                frame = np.asarray(frame)
+                if frame.shape != (height, width, 3) or frame.dtype != np.uint8:
+                    raise ValueError("video frame must be uint8 HWC with consistent dimensions")
+                value = av.VideoFrame.from_ndarray(np.ascontiguousarray(frame), format="rgb24")
+                for packet in stream.encode(value):
+                    output.mux(packet)
+                progress.update(index, len(frames))
+            for packet in stream.encode():
+                output.mux(packet)
+        temporary.replace(video_path)
+    except BaseException:
         progress.break_line()
-        _stop_subprocess(process)
-        ivf_path.unlink(missing_ok=True)
-        remux_path.unlink(missing_ok=True)
-        video_path.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
         raise
-    except Exception as exc:
-        progress.break_line()
-        _stop_subprocess(process)
-        stdout = (
-            process.stdout.read().decode("utf-8", errors="replace")
-            if process.stdout
-            else ""
-        )
-        stderr = (
-            process.stderr.read().decode("utf-8", errors="replace")
-            if process.stderr
-            else ""
-        )
-        ivf_path.unlink(missing_ok=True)
-        remux_path.unlink(missing_ok=True)
-        video_path.unlink(missing_ok=True)
-        details = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())
-        raise HardwareVideoEncodingError(
-            f"Jetson AV1 pipeline failed: {type(exc).__name__}: {exc}; {details[-2000:]}"
-        ) from exc
-
-    if return_code != 0 or not ivf_path.is_file():
-        ivf_path.unlink(missing_ok=True)
-        remux_path.unlink(missing_ok=True)
-        video_path.unlink(missing_ok=True)
-        details = "\n".join(part.strip() for part in (stdout, stderr) if part.strip())
-        raise HardwareVideoEncodingError(
-            f"Jetson AV1 encoder failed with exit code {return_code}: {details[-2000:]}"
-        )
-
-    print(
-        f"[LeRobot转换][阶段 7/8][MP4封装][{label}] "
-        "硬件AV1编码完成，正在无损remux IVF → MP4",
-        flush=True,
-    )
-    remux_command = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "ivf",
-        "-i",
-        str(ivf_path),
-        "-c:v",
-        "copy",
-        "-y",
-        str(remux_path),
-    ]
-    remux_process = subprocess.Popen(
-        remux_command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    try:
-        remux_stdout, remux_stderr = remux_process.communicate()
-    except KeyboardInterrupt:
-        _stop_subprocess(remux_process)
-        ivf_path.unlink(missing_ok=True)
-        remux_path.unlink(missing_ok=True)
-        video_path.unlink(missing_ok=True)
-        raise
-    except Exception as exc:
-        _stop_subprocess(remux_process)
-        ivf_path.unlink(missing_ok=True)
-        remux_path.unlink(missing_ok=True)
-        video_path.unlink(missing_ok=True)
-        raise HardwareVideoEncodingError(
-            f"AV1 IVF remux failed: {type(exc).__name__}: {exc}"
-        ) from exc
-
-    if remux_process.returncode != 0 or not remux_path.is_file():
-        details = "\n".join(
-            value.decode("utf-8", errors="replace").strip()
-            for value in (remux_stdout, remux_stderr)
-            if value.strip()
-        )
-        ivf_path.unlink(missing_ok=True)
-        remux_path.unlink(missing_ok=True)
-        video_path.unlink(missing_ok=True)
-        raise HardwareVideoEncodingError(
-            f"AV1 IVF remux failed with exit code {remux_process.returncode}: "
-            f"{details[-2000:]}"
-        )
-
-    remux_path.replace(video_path)
-    ivf_path.unlink(missing_ok=True)

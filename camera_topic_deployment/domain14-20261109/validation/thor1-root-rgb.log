@@ -1,0 +1,87 @@
+Domain 14，/tmp/ros2-camera-topic-0/subscriber-shm.xml；已加载当前终端，未启动订阅。
+{
+  "domain": "14",
+  "rmw": "rmw_fastrtps_cpp",
+  "xml": "/tmp/ros2-camera-topic-0/subscriber-shm.xml",
+  "measurement_seconds": 30.0,
+  "warmup_seconds": 5.0,
+  "topics": {
+    "/camera/color/image_raw": {
+      "messages": 895,
+      "arrival_hz": 29.838360425918935,
+      "stamp_hz": 29.830690763268,
+      "max_arrival_gap_ms": 70.24788599983367,
+      "arrival_gap_p95_ms": 34.7265759999118,
+      "max_stamp_gap_ms": 66.82586669921875,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "width": 640,
+      "height": 480,
+      "encoding": "rgb8",
+      "step": 1920,
+      "frame_bytes": 921600,
+      "frame_id": "camera_color_optical_frame",
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827ebe6ee7be0000000000008103",
+          "reliability": "2",
+          "durability": "2"
+        }
+      ]
+    },
+    "/wrist_cameras/left/color/image_raw": {
+      "messages": 898,
+      "arrival_hz": 29.959598680586712,
+      "stamp_hz": 29.950699941621345,
+      "max_arrival_gap_ms": 60.64613800003826,
+      "arrival_gap_p95_ms": 33.989915999882214,
+      "max_stamp_gap_ms": 66.70379638671875,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "width": 640,
+      "height": 480,
+      "encoding": "rgb8",
+      "step": 1920,
+      "frame_bytes": 921600,
+      "frame_id": "left_color_optical_frame",
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827eb76ef1000000000000001503",
+          "reliability": "1",
+          "durability": "1"
+        }
+      ]
+    },
+    "/wrist_cameras/right/color/image_raw": {
+      "messages": 899,
+      "arrival_hz": 29.95647291726475,
+      "stamp_hz": 29.950859100061088,
+      "max_arrival_gap_ms": 60.52957699989747,
+      "arrival_gap_p95_ms": 33.902574999956414,
+      "max_stamp_gap_ms": 66.70093536376953,
+      "duplicate_adjacent_stamps": 0,
+      "backward_stamps": 0,
+      "width": 640,
+      "height": 480,
+      "encoding": "rgb8",
+      "step": 1920,
+      "frame_bytes": 921600,
+      "frame_id": "right_color_optical_frame",
+      "publishers": [
+        {
+          "node": "_NODE_NAME_UNKNOWN_",
+          "namespace": "_NODE_NAMESPACE_UNKNOWN_",
+          "gid": "010f827e846f2a8d0000000000001503",
+          "reliability": "1",
+          "durability": "1"
+        }
+      ]
+    }
+  },
+  "all_topics_received": true,
+  "note": "Receiving messages is not a frequency/stability acceptance test; compare with each stream configuration and local baseline."
+}

@@ -1,0 +1,64 @@
++ apt-get update
+Hit:1 https://download.docker.com/linux/ubuntu noble InRelease
+Hit:2 https://repo.download.nvidia.cn/jetson/common r39.2 InRelease
+Hit:3 https://repo.download.nvidia.cn/jetson/som r39.2 InRelease
+Hit:4 https://repo.download.nvidia.cn/jetson/ffmpeg r39.2 InRelease
+Hit:5 http://ports.ubuntu.com/ubuntu-ports noble InRelease
+Get:6 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
+Get:7 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
+Get:8 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
+Hit:9 http://packages.ros.org/ros2/ubuntu noble InRelease
+Get:10 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [1482 kB]
+Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Components [178 kB]
+Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [1762 kB]
+Get:13 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe Translation-en [344 kB]
+Get:14 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Components [387 kB]
+Get:15 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [2743 kB]
+Get:16 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Components [3560 B]
+Get:17 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Components [12.6 kB]
+Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [1216 kB]
+Get:19 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Components [43.3 kB]
+Get:20 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1312 kB]
+Get:21 http://ports.ubuntu.com/ubuntu-ports noble-security/universe Translation-en [248 kB]
+Get:22 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Components [76.3 kB]
+Fetched 10.2 MB in 10s (1053 kB/s)
+Reading package lists...
++ apt-get install -y --no-remove python3 iproute2 procps util-linux ros-jazzy-rmw-fastrtps-cpp ros-jazzy-ros2cli ros-jazzy-ros2topic ros-jazzy-rclpy ros-jazzy-sensor-msgs
+Reading package lists...
+Building dependency tree...
+Reading state information...
+python3 is already the newest version (3.12.3-0ubuntu2.1).
+python3 set to manually installed.
+iproute2 is already the newest version (6.1.0-1ubuntu6.4).
+iproute2 set to manually installed.
+procps is already the newest version (2:4.0.4-4ubuntu3.3).
+util-linux is already the newest version (2.39.3-9ubuntu6.6).
+ros-jazzy-rmw-fastrtps-cpp is already the newest version (8.4.4-1noble.20260911.054759).
+ros-jazzy-rmw-fastrtps-cpp set to manually installed.
+ros-jazzy-ros2cli is already the newest version (0.32.13-1noble.20261006.034053).
+ros-jazzy-ros2cli set to manually installed.
+ros-jazzy-ros2topic is already the newest version (0.32.13-1noble.20261006.034446).
+ros-jazzy-ros2topic set to manually installed.
+ros-jazzy-rclpy is already the newest version (7.1.12-1noble.20260911.111116).
+ros-jazzy-rclpy set to manually installed.
+ros-jazzy-sensor-msgs is already the newest version (5.3.8-1noble.20260911.124809).
+ros-jazzy-sensor-msgs set to manually installed.
+0 upgraded, 0 newly installed, 0 to remove and 3 not upgraded.
++ systemctl daemon-reload
++ systemctl enable ros2-camera-buffers.service
+Created symlink /etc/systemd/system/multi-user.target.wants/ros2-camera-buffers.service → /etc/systemd/system/ros2-camera-buffers.service.
++ systemctl restart ros2-camera-buffers.service
++ systemctl --no-pager --full status ros2-camera-buffers.service
+● ros2-camera-buffers.service - ROS 2 camera UDP buffer ceilings
+     Loaded: loaded (/etc/systemd/system/ros2-camera-buffers.service; enabled; preset: enabled)
+     Active: active (exited) since Mon 2026-11-09 09:24:09 CST; 49ms ago
+    Process: 11529 ExecStart=/usr/bin/python3 /home/grg/ros2_camera_link/prepare_buffers.py (code=exited, status=0/SUCCESS)
+   Main PID: 11529 (code=exited, status=0/SUCCESS)
+        CPU: 52ms
+
+Nov 09 09:24:09 localhost.localdomain systemd[1]: Starting ros2-camera-buffers.service - ROS 2 camera UDP buffer ceilings...
+Nov 09 09:24:09 localhost.localdomain systemd[1]: Finished ros2-camera-buffers.service - ROS 2 camera UDP buffer ceilings.
+
+配置及服务已安装。服务 active 不代表图像帧率验收通过。
+root 和普通用户均执行：source /home/grg/ros2_camera_link/receiver_env.sh
+图像订阅由你自行启动；本脚本不自动执行 topic hz。

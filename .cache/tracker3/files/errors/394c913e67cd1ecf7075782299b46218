@@ -1,0 +1,4 @@
+[Report]
+Uri=file:///home/grg/Downloads/robot-agent
+Message=ambiguous column name: ROWID
+Sparql=DELETE WHERE {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n  <urn:fileid:/dev/nvme0n1p1:945414> nie:isStoredAs ?nie_isStoredAs } };\nDELETE WHERE {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n  <urn:fileid:/dev/nvme0n1p1:945414> nie:mimeType ?nie_mimeType } };\nDELETE WHERE {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n  <file:///home/grg/Downloads/robot-agent> nie:interpretedAs ?nie_interpretedAs } };\nINSERT DATA {\nGRAPH <http://tracker.api.gnome.org/ontology/v3/tracker#FileSystem> {\n<file:///home/grg/Downloads/robot-agent> a nfo:FileDataObject ; \n  nie:interpretedAs <urn:fileid:/dev/nvme0n1p1:945414> .\n<urn:fileid:/dev/nvme0n1p1:945414> a nie:InformationElement , nfo:Folder ; \n  nie:isStoredAs <file:///home/grg/Downloads/robot-agent> ; \n  nie:mimeType "inode/directory" .\n}\n};\n

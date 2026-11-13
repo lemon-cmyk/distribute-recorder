@@ -1,0 +1,20 @@
+{
+  "device": "thor1",
+  "installed_at": "2026-11-09T09:24:09.557692",
+  "driver_mode": "none",
+  "sdk_sha256": null,
+  "backup": "/var/backups/ros2-camera-topic/20261109-092408-614885",
+  "installed_files": [
+    "/home/grg/ros2_camera_link/driver_probe.py",
+    "/home/grg/ros2_camera_link/env.sh",
+    "/home/grg/ros2_camera_link/prepare_buffers.py",
+    "/home/grg/ros2_camera_link/receiver_env.sh",
+    "/home/grg/ros2_camera_link/run_receiver.sh",
+    "/home/grg/ros2_camera_link/topics-wired.txt",
+    "/home/grg/ros2_camera_link/transport.py",
+    "/home/grg/ros2_camera_link/config.json",
+    "/home/grg/ros2_camera_link/robot.json",
+    "/etc/systemd/system/ros2-camera-buffers.service",
+    "/home/grg/ros2_camera_link/installed-versions.txt"
+  ]
+}
